@@ -23,6 +23,10 @@ let
       selectSink = callLib ./lib/graph/selectSink.nix;
       compile = callLib ./lib/graph/compile.nix;
     };
+
+    shim = {
+      wrapCommand = callLib ./lib/shim/wrapCommand.nix;
+    };
   };
 in
 dyndrv
