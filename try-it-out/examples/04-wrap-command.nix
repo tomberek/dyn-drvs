@@ -52,6 +52,7 @@ let
 
   shim = dyndrv.shim.wrapCommand {
     command = "fakecc";
+    realCommand = "${pkgs.coreutils}/bin/true"; # never reached: toNode never returns null here
     inherit toNode;
   };
 in

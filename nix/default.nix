@@ -27,6 +27,10 @@ let
     shim = {
       wrapCommand = callLib ./lib/shim/wrapCommand.nix;
     };
+
+    accelerate = {
+      mkAcceleratedStdenv = callLib ./lib/accelerate/mkAcceleratedStdenv.nix;
+    };
   };
 in
 dyndrv
