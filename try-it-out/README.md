@@ -2,7 +2,29 @@
 
 Five minutes to your first dynamic derivation.
 
-### 1. Get a Nix that supports `builder-rpc-v0` (dyndrv's default backend)
+### 0. Just want to accelerate an existing package? Start here, no patched Nix needed
+
+```console
+$ nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
+    --extra-system-features recursive-nix --store 'local?root=/tmp/dyndrv-store' \
+    -f examples/05-accelerate-wrap.nix
+```
+
+`05-accelerate-wrap.nix` builds a tiny 3-file C program via
+`dyndrv.accelerate.wrap` end to end: each `cc -c` invocation becomes its
+own dynamically-produced, immediately-realized derivation, and only the
+link step passes through unaccelerated. This is the mechanism
+`try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
+`real-package-patch-rebuild.sh` measure — see those (and `../README.md`'s
+own Benchmarks section) for real numbers on when this is actually worth
+adopting.
+
+The rest of this file covers `dyndrv.mkDynamicDerivation` and the
+`builder-rpc-v0` backend — the lower-level primitives most users won't
+need directly, but which `dyndrv.graph.compile` and anyone building a
+lang2nix-style tool will.
+
+### 1. Get a Nix that supports `builder-rpc-v0` (dyndrv's default backend for `mkDynamicDerivation`)
 
 `builder-rpc-v0` (the mechanism `dyndrv.mkDynamicDerivation` defaults to,
 since it avoids `recursive-nix`'s overhead) is unreleased -- tracked at
@@ -46,9 +68,12 @@ This is the pairing the whole library is designed around: `builder-rpc-v0`
 is the better default when it's available, but nothing here forces an
 all-or-nothing bet on an unreleased Nix feature to get started.
 
+`03-graph-of-two.nix` and `04-wrap-command.nix` cover `dyndrv.graph.compile`
+(a genuinely dependent multi-node graph) and `dyndrv.shim.wrapCommand` (the
+$PATH-command-interception primitive `accelerate.wrap` is built from)
+respectively.
+
 ### 3. Not sure what your Nix supports?
 
-`dyndrv doctor` (v0.2+) will report exactly which of
-dynamic-derivations/ca-derivations/recursive-nix/builder-rpc-v0/
-submit-output the current Nix actually supports. Until then,
-`nix-config.sh` documents the exact feature flags dyndrv needs.
+`nix-config.sh` documents the exact feature flags dyndrv needs. A
+dedicated `dyndrv doctor` diagnostic command is tracked as future work.

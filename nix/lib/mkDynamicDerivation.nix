@@ -147,7 +147,13 @@ lib.extendMkDerivation {
 
       args = {
         passthru = {
-          inherit drv;
+          # `dynamicDrv` (not `drv`) to match the plan's own UX contract:
+          # every `dyndrv`-produced derivation exposes the SAME escape-
+          # hatch names (`passthru.dynamicDrv`/`passthru.outputOf`/
+          # `passthru.backend`) regardless of which entry point produced
+          # it, so "I need the raw thing underneath" is always the same
+          # two attribute names rather than a per-function bespoke API.
+          dynamicDrv = drv;
           outputOf = finalOutput;
           backend = drv.backend;
         };

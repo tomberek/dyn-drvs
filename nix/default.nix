@@ -30,6 +30,7 @@ let
 
     accelerate = {
       mkAcceleratedStdenv = callLib ./lib/accelerate/mkAcceleratedStdenv.nix;
+      wrap = callLib ./lib/accelerate/wrap.nix;
     };
   };
 in
