@@ -170,8 +170,9 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
 ## Benchmarks
 
 ```console
-$ ./try-it-out/benchmarks/registration-overhead.sh      # metric 3: the per-call "tax"
-$ ./try-it-out/benchmarks/small-lib-patch-rebuild.sh     # metrics 1/2/4: the accelerator's real win (and honest loss case)
+$ ./try-it-out/benchmarks/registration-overhead.sh          # metric 3: the per-call "tax"
+$ ./try-it-out/benchmarks/small-lib-patch-rebuild.sh         # metrics 1/2/4: synthetic fixture, real win (and honest loss case)
+$ ./try-it-out/benchmarks/real-package-patch-rebuild.sh      # same metrics against real, unmodified nixpkgs freetype
 ```
 
 See `try-it-out/benchmarks/BASELINE.md` for the last-known numbers, kept
@@ -182,16 +183,22 @@ the tradeoff does *not* favor `dyndrv` too (it's documented, not hidden).
 
 ## Known limitations
 
-- **`shim.wrapCommand`/`accelerate.mkAcceleratedStdenv` only track files
-  named explicitly in a command's argv** — they have no `#include`-search-
-  path awareness. A C/C++ package with a shared local header included by
-  every translation unit will fail with "No such file or directory"
-  inside the per-TU sandbox, because the header was never declared as a
-  sandbox input. This is a real, current gap (the "build-time discovery"
-  problem, generalizing nix-ninja's own header-dependency discovery),
-  deferred to v0.3's `discover.thenExtend`. See
-  `try-it-out/benchmarks/BASELINE.md` for how the benchmark's own fixture
-  works around it today.
+- **`accelerate.mkAcceleratedStdenv` only accelerates `cc`, not `ar`/the
+  linker** — link steps and archiving pass through unaccelerated (this is
+  deliberate v0.2 scope, not a bug: those are comparatively cheap and
+  rarely dominate a real rebuild).
+- **Packages that bake their own not-yet-known `$out` path into every
+  compile flag (openssl's `-DOPENSSLDIR=`/`-DENGINESDIR=`/`-DMODULESDIR=`
+  being the confirmed example) cannot demonstrate per-TU caching on a
+  patch** — since `$out` changes whenever the outer derivation's own
+  attributes change, EVERY per-TU derivation's hash changes too, for a
+  reason that has nothing to do with which file was actually edited. This
+  is a structural property of those packages' own build systems, not a
+  dyndrv bug — nixgg's own real fix needs `builder-rpc-v0` + an
+  `out = "/nonexistent"` sandboxed phase + a separate restore/patchelf
+  phase (`phases.split`), genuinely v0.3 scope. See
+  `try-it-out/benchmarks/BASELINE.md` for the full finding and why
+  `real-package-patch-rebuild.sh` uses freetype instead.
 - **`graph.compile` only implements the `builder-rpc-v0` backend** —
   `recursive-nix` multi-node graphs need their own single-composed-Nix-
   expression codegen (confirmed to work in principle; not yet built).
