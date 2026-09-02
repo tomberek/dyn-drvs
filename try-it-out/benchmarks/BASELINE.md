@@ -205,5 +205,7 @@ the correct version against the accelerated build's own `libfreetype.so`).
 
 ## Diff-size comparison (nixpkgs idioms)
 
-Not yet built (`generated-diff-comparison.md`, static, no build required) —
-tracked as follow-on work per the plan's "Measuring the benefit" section.
+See `generated-diff-comparison.md` — a static, no-build comparison of real
+nixpkgs dependency-bump commits (gemset.nix, deps.json, crate2nix's
+Cargo.nix) against the zero-line diff a `dyndrv`-based build-time resolver
+would produce for the same change.
