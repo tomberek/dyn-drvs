@@ -80,7 +80,7 @@ nix/lib/accelerate/   The one-line stdenv accelerator, built on shim/
 nix/tests/            dyndrv's own tests, cross-checked against Nix's oracle
 tests/oracle/         Vendored reference copies of Nix core's own
                       tests/functional/dyn-drv/ test cases
-try-it-out/           Get-started tooling: a patched-Nix packaging recipe,
+try-it-out/           Get-started tooling: a NixOS/nix packaging recipe,
                       a run-nix.sh wrapper, runnable examples, and benchmarks
 try-it-out/benchmarks/  Reproducible numbers, not just README claims —
                         see BASELINE.md
@@ -88,8 +88,9 @@ try-it-out/benchmarks/  Reproducible numbers, not just README claims —
 
 ## Quickstart
 
-**Want to accelerate an existing C/C++ package?** No patched Nix needed,
-one attribute changed — override the `stdenv` a package is built with:
+**Want to accelerate an existing C/C++ package?** No special Nix build
+needed, one attribute changed — override the `stdenv` a package is built
+with:
 
 ```nix
 myPackage.override {
@@ -106,17 +107,18 @@ multi-file builds (synthetic and real-nixpkgs, respectively).
 
 **Want to build a lang2nix-style tool, or a dependency-graph compiler
 (gradle-drvs'/sandstone's use case)?** The **`builder-rpc-v0` backend is
-the default**, but it requires an unreleased/patched Nix (tracking
-[NixOS/nix#15793](https://github.com/NixOS/nix/pull/15793)). If you don't
-have one, `dyndrv.capabilities.withFallback` lets you degrade gracefully —
-see `try-it-out/examples/02-fallback-ifd.nix`, which runs on plain, stock
-Nix with no experimental features at all.
-
-If you do have a NixOS/nix#15793 checkout built locally:
+the default**. It's on real NixOS/nix `master` (commit `55eea4554`,
+"Implement new builder-rpc-v0 derivation feature") — not in a stable
+release yet, so most installed Nix binaries (Determinate, nixos-unstable's
+pinned Nix, etc.) still don't have it, but `try-it-out/run-nix.sh` fetches
+and builds a working one directly (see `try-it-out/patched-nix.nix`), no
+patched fork or local checkout required. If you'd rather not fetch that,
+`dyndrv.capabilities.withFallback` lets you degrade gracefully — see
+`try-it-out/examples/02-fallback-ifd.nix`, which runs on plain, stock Nix
+with no experimental features at all.
 
 ```console
-$ NIX_SRC=/path/to/nix-checkout/build-release ./try-it-out/run-nix.sh \
-    build --impure -f try-it-out/examples/01-hello-dynamic-drv.nix
+$ ./try-it-out/run-nix.sh build --impure -f try-it-out/examples/01-hello-dynamic-drv.nix
 ```
 
 See `try-it-out/README.md` for the full walkthrough, and
@@ -139,7 +141,7 @@ dyndrv.mkDynamicDerivation {
 
 | Function | What it's for |
 |---|---|
-| `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the whole outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. `backend = "auto"` (default) currently always resolves to `"recursive-nix"` — pass `backend = "builder-rpc-v0"` explicitly if you have a patched Nix and want it; check `passthru.backend` to confirm what was actually selected. |
+| `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the whole outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. `backend = "auto"` (default) currently always resolves to `"recursive-nix"` — pass `backend = "builder-rpc-v0"` explicitly if you have a Nix build recent enough to support it (see `try-it-out/patched-nix.nix`) and want it; check `passthru.backend` to confirm what was actually selected. |
 | `dyndrv.builders.viaNixInstantiate` / `.viaDerivationAdd` | The two backend-specific ways a single `producer` can construct its inner derivation (`recursive-nix` + `nix-instantiate`, vs. `builder-rpc-v0` + `nix derivation add`/`nix store submit-output`). |
 | `dyndrv.capabilities.detect` / `.withFallback` | Feature detection and a graceful degrade-to-IFD combinator, so adopting `dyndrv` is never an all-or-nothing bet on an experimental Nix feature. |
 | `dyndrv.mkOutputOf` / `dyndrv.wrapOutputOf` | Low-level helpers that paper over `builtins.outputOf`'s two permanent rough edges (string-only argument, `DrvDeep`-context rejection) and turn a raw `outputOf` string into something `nix run`/`nix profile install` can consume. |
@@ -223,11 +225,13 @@ the tradeoff does *not* favor `dyndrv` too (it's documented, not hidden).
 - **`graph.compile` only implements the `builder-rpc-v0` backend** —
   `recursive-nix` multi-node graphs need their own single-composed-Nix-
   expression codegen (confirmed to work in principle; not yet built).
-- **`builder-rpc-v0` support requires packaging a patched Nix yourself**
-  (see `try-it-out/patched-nix.nix`); there is no released Nix with this
-  feature yet. Nothing that needs it (`graph.compile`, `mkDynamicDerivation`'s
-  default backend) works without one — `capabilities.withFallback` is the
-  escape hatch.
+- **`builder-rpc-v0` support needs a Nix build recent enough to have it**
+  (see `try-it-out/patched-nix.nix`, which fetches+builds one directly —
+  no patched fork, no source patching); there is no STABLE RELEASE with
+  this feature yet, so most installed Nix binaries (Determinate,
+  nixos-unstable's pinned Nix, etc.) don't have it out of the box. Nothing
+  that needs it (`graph.compile`, `mkDynamicDerivation`'s default backend)
+  works without one — `capabilities.withFallback` is the escape hatch.
 - **`shim.wrapCommand`'s `resolveInputs = "defer"` mode is not
   implemented** (only `"materialize"`, which blocks on each dependency
   immediately) — needs its own stub-file format + collecting pass,

@@ -28,26 +28,29 @@ lang2nix-style tool will.
 ### 1. Get a Nix that supports `builder-rpc-v0` (dyndrv's default backend for `mkDynamicDerivation`)
 
 `builder-rpc-v0` (the mechanism `dyndrv.mkDynamicDerivation` defaults to,
-since it avoids `recursive-nix`'s overhead) is unreleased -- tracked at
-[NixOS/nix#15793](https://github.com/NixOS/nix/pull/15793). Neither mainline
-nor Determinate Nix nor the system nix-daemon support it yet.
+since it avoids `recursive-nix`'s overhead) is on real NixOS/nix `master`
+(commit `55eea4554`, "Implement new builder-rpc-v0 derivation feature") --
+not in a stable release yet, so neither mainline, Determinate Nix, nor the
+system nix-daemon support it out of the box. It needs NO patched fork and
+NO source patches, though -- just a Nix build recent enough to include
+that commit.
 
 ```console
-$ git clone <your NixOS/nix#15793 checkout> ~/nix-checkout
-$ cd ~/nix-checkout && meson setup build-release --buildtype release && ninja -C build-release
-$ NIX_SRC=~/nix-checkout/build-release ./run-nix.sh --version
+$ ./run-nix.sh --version
 ```
 
-`run-nix.sh` builds `patched-nix.nix` with your ambient system Nix, then
-re-execs into it against a local non-daemon store (`/tmp/dyndrv-store` by
-default) with the right `--extra-experimental-features`/
-`--extra-system-features` already set -- no flags to remember.
+`run-nix.sh` fetches and builds a pinned NixOS/nix commit
+(`patched-nix.nix` -- see its own header comment for the full finding),
+then re-execs into it against a local non-daemon store (`/tmp/dyndrv-store`
+by default) with the right `--extra-experimental-features`/
+`--extra-system-features` already set -- no flags to remember, no local
+checkout or build step required. Override `NIX_REV` to try a different
+commit; override `DYNDRV_STORE` to use a different local store root.
 
 ### 2. Run the examples
 
 ```console
-$ ./run-nix.sh build -f examples/01-hello-dynamic-drv.nix
-$ cat $(readlink -f result | sed 's|^/nix|/tmp/dyndrv-store/nix|')
+$ ./run-nix.sh build --impure --print-out-paths -f examples/01-hello-dynamic-drv.nix
 ```
 
 `01-hello-dynamic-drv.nix` builds a minimal dynamic derivation via the
@@ -58,8 +61,8 @@ derivation via `nix store submit-output`.
 
 `02-fallback-ifd.nix` shows the same intent expressed through
 `capabilities.withFallback` -- a `dynamic` alternative alongside a plain
-`ifd` alternative, so it *also* works on stock, unpatched Nix (try it with
-plain `nix build`, no `run-nix.sh`, no patched Nix required):
+`ifd` alternative, so it *also* works on stock Nix (try it with plain
+`nix build`, no `run-nix.sh`, no special Nix build required):
 
 ```console
 $ nix build --extra-experimental-features "nix-command" -f examples/02-fallback-ifd.nix
@@ -67,7 +70,7 @@ $ nix build --extra-experimental-features "nix-command" -f examples/02-fallback-
 
 This is the pairing the whole library is designed around: `builder-rpc-v0`
 is the better default when it's available, but nothing here forces an
-all-or-nothing bet on an unreleased Nix feature to get started.
+all-or-nothing bet on a not-yet-released Nix feature to get started.
 
 `03-graph-of-two.nix`/`03-graph-of-three.nix` and `04-wrap-command.nix`
 cover `dyndrv.graph.compile` (genuinely dependent multi-node graphs -- two
