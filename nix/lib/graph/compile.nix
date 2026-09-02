@@ -19,7 +19,12 @@
 # eval->build (JSON) boundary per-node loses Nix's own dependency-tracking
 # string context (confirmed directly: this is why v0.1's `viaDerivationAdd`
 # stayed single-node). `graph.compile` is therefore its own producer
-# constructor, not a wrapper around N `viaDerivationAdd` calls.
+# constructor (returning the same `{ script, extraDrvArgs }` shape
+# `mkDynamicDerivation.nix`'s header comment defines as "the producer
+# contract" -- despite living under `graph.*` rather than `builders.*`,
+# it's exactly as valid a `producer` as `builders.viaDerivationAdd`, just
+# one that internally orchestrates a whole graph of nodes instead of one),
+# not a wrapper around N `viaDerivationAdd` calls.
 #
 # v0.2 SCOPE: implements the `builder-rpc-v0` backend only (the natural
 # fit -- `nix derivation add`'s JSON schema already has `inputs.drvs`).

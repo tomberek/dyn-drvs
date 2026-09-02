@@ -3,7 +3,10 @@
 # A `producer` constructor for the "builder-rpc-v0" backend: registers one
 # derivation via `nix derivation add` (reading hand-built JSON on stdin) and
 # hands its output to the outer derivation via `nix store submit-output`,
-# instead of writing to `$out` directly.
+# instead of writing to `$out` directly. Returns the `{ script, extraDrvArgs }`
+# shape `mkDynamicDerivation.nix`'s own header comment defines as "the
+# producer contract" -- see there for the full shape and why it's
+# duck-typed rather than a formal abstraction.
 #
 # `builder-rpc-v0` sandboxes have no store DB view and cannot call
 # `nix-instantiate`/`builtins.outputOf`/`builtins.storePath` (confirmed

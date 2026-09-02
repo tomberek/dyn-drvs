@@ -3,7 +3,10 @@
 # A `producer` constructor for the "recursive-nix" backend: runs
 # `nix-instantiate` on a literal Nix expression *inside* the sandbox
 # (recursive-nix lets a build invoke Nix itself), installing the resulting
-# `.drv` as the outer derivation's output.
+# `.drv` as the outer derivation's output. Returns the `{ script,
+# extraDrvArgs }` shape `mkDynamicDerivation.nix`'s own header comment
+# defines as "the producer contract" -- see there for the full shape and
+# why it's duck-typed rather than a formal abstraction.
 #
 # Ported from drowse's `instantiate.nix`. Pass an `expr` that does a
 # `callPackage`-style `import ./generated.nix { ... }` yourself if that's

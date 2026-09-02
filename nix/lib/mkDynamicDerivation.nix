@@ -21,6 +21,27 @@
 # meta/pname/version/position so the returned derivation looks and behaves
 # like an ordinary one.
 #
+# THE PRODUCER CONTRACT: a `producer` is any attrset shaped like
+#   { script :: backend -> string; extraDrvArgs :: attrset; }
+# `script` is called with the SELECTED backend (`"recursive-nix"` or
+# `"builder-rpc-v0"`) and must return the entire `buildPhase` body
+# (including its own `runHook` calls) for that backend -- for
+# `recursive-nix` it leaves the produced `.drv` at `$out` itself; for
+# `builder-rpc-v0` it calls `nix store submit-output` instead (see the
+# `out = "/nonexistent"` override below for why). `extraDrvArgs` is merged
+# into the outer derivation's own attrs (`nativeBuildInputs`,
+# `passAsFile`, etc. -- whatever the producer's script needs available).
+#
+# This is a plain duck-typed contract, not a real abstraction with its own
+# constructor -- every `dyndrv.builders.*` function AND `dyndrv.graph.compile`
+# independently satisfy it and are freely interchangeable as `producer`
+# values (`graph.compile`'s result is just as valid a `producer` as
+# `builders.viaDerivationAdd`'s, despite living under a different
+# top-level name -- it compiles a whole graph into the SAME `{ script,
+# extraDrvArgs }` shape a single-node producer returns). Anyone writing a
+# custom `producer` from scratch needs to satisfy only this shape, nothing
+# more.
+#
 # IMPORTANT, confirmed by direct reproduction (matches gradle-drvs' own
 # "assembler must match outer name" workaround): the INNER derivation your
 # `producer` constructs must be named exactly `"${pname}-${version}"` (or
@@ -29,7 +50,12 @@
 # at realization time and fails with "derivation has incorrect output
 # '&lt;path&gt;', should be '&lt;expected&gt;'" if the inner derivation's name
 # doesn't match, since a CA/text-hashed derivation's output path is a
-# function of its declared name.
+# function of its declared name. `graph.compile` takes its own `name`
+# argument for exactly this reason -- there is no eval-time check tying
+# the two together, so a caller of `graph.compile` must pass the SAME
+# string there as `mkDynamicDerivation`'s `pname`-`version` (or `name`)
+# computes, by hand; getting it wrong produces the same realization-time
+# error, one level removed from anything the caller wrote directly.
 
 let
   inherit (pkgs) stdenvNoCC runCommand;
@@ -48,6 +74,17 @@ lib.extendMkDerivation {
     finalAttrs:
     args@{
       producer,
+      # `backend`: "auto" | "recursive-nix" | "builder-rpc-v0". Read this
+      # plainly: "auto" ALWAYS resolves to "recursive-nix" today, never
+      # "builder-rpc-v0" -- NOT "best available," because "best available"
+      # isn't eval-time computable (confirmed against Nix's own source:
+      # `builder-rpc-v0`/`submit-output` support is negotiated during the
+      # daemon connection handshake, not exposed through any `builtins`,
+      # see `capabilities.nix`'s own header comment for the full finding).
+      # If you have a patched Nix and want `builder-rpc-v0`, pass it
+      # explicitly -- "auto" will not find it for you. Check
+      # `passthru.backend` on the result if you need to confirm which one
+      # actually got selected.
       backend ? "auto",
       onUnsupported ? "ifd",
       ...

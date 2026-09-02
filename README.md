@@ -139,7 +139,7 @@ dyndrv.mkDynamicDerivation {
 
 | Function | What it's for |
 |---|---|
-| `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the whole outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. |
+| `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the whole outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. `backend = "auto"` (default) currently always resolves to `"recursive-nix"` — pass `backend = "builder-rpc-v0"` explicitly if you have a patched Nix and want it; check `passthru.backend` to confirm what was actually selected. |
 | `dyndrv.builders.viaNixInstantiate` / `.viaDerivationAdd` | The two backend-specific ways a single `producer` can construct its inner derivation (`recursive-nix` + `nix-instantiate`, vs. `builder-rpc-v0` + `nix derivation add`/`nix store submit-output`). |
 | `dyndrv.capabilities.detect` / `.withFallback` | Feature detection and a graceful degrade-to-IFD combinator, so adopting `dyndrv` is never an all-or-nothing bet on an experimental Nix feature. |
 | `dyndrv.mkOutputOf` / `dyndrv.wrapOutputOf` | Low-level helpers that paper over `builtins.outputOf`'s two permanent rough edges (string-only argument, `DrvDeep`-context rejection) and turn a raw `outputOf` string into something `nix run`/`nix profile install` can consume. |
@@ -148,6 +148,18 @@ dyndrv.mkDynamicDerivation {
 | `dyndrv.graph.assemble` / `.selectSink` | The two `toOutput` strategies `graph.compile` supports: merge every node's output into one tree, or return one named "sink" node's output directly. |
 | `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so each invocation becomes its own dynamically-produced, immediately-realized derivation — `recursive-nix` backend. What `accelerate.mkAcceleratedStdenv` is built from. |
 | `dyndrv.accelerate.mkAcceleratedStdenv` | The lowest-friction entry point in the library: `{ stdenv }: stdenv`, for overriding an existing package's `stdenv` (`myPkg.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }`). Ordinary `cc -c` compiles become independent, per-translation-unit cacheable derivations. `granularity = "file"` (default) or `"package"` (no-op escape hatch). |
+
+### The producer contract
+
+`producer` is a plain, duck-typed shape — `{ script :: backend -> string;
+extraDrvArgs :: attrset; }` — not a special type. `dyndrv.builders.
+viaNixInstantiate`/`.viaDerivationAdd` are the two single-node
+constructors; `dyndrv.graph.compile` satisfies the exact same shape while
+internally orchestrating a whole graph of nodes, so it's just as valid a
+`producer` argument despite living under a different top-level name.
+Writing your own is only ever a matter of matching this shape — see
+`nix/lib/mkDynamicDerivation.nix`'s header comment for the full contract
+and the naming constraint every producer's inner derivation must satisfy.
 
 ### Escape hatches
 
