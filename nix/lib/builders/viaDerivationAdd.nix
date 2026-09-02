@@ -52,28 +52,43 @@
 #              boundary -- so it never appears as a literal string in the
 #              outer derivation's own eval-time attributes.
 #
-# `nixPackage`: the patched Nix (tracking NixOS/nix#15793) to run `nix
-#               derivation add`/`nix store submit-output` with, INSIDE the
-#               sandbox. Deliberately not defaulted to `pkgs.nix`: an
-#               unpatched client sends a `SetOptions` worker-protocol call
-#               on connect that the restricted store rejects outright
-#               ("Operation 19 not allowed inside derivation") -- only a
-#               client that negotiates `featureDisableSetOptions` (the
-#               patched build) works here. `try-it-out/patched-nix.nix`
-#               is the intended source for this argument.
+# `nixPackage`: the Nix to run `nix derivation add`/`nix store
+#               submit-output` with, INSIDE the sandbox --
+#               `try-it-out/patched-nix.nix` is the intended source for
+#               this argument (fetches+builds a real NixOS/nix commit;
+#               no patched fork needed, see that file's own header
+#               comment for the full finding). Deliberately not defaulted
+#               to `pkgs.nix`.
 #
-#               MUST be a properly-packaged Nix store derivation (e.g. via
-#               `autoPatchelfHook`, not a raw copy of a meson build tree's
-#               binary) -- verified end-to-end against a local build of
-#               NixOS/nix#15793: a hand-copied binary's `$ORIGIN`-relative
-#               rpath and unregistered runtime closure (glibc/sqlite/etc)
-#               both break once the binary is referenced by a plain string
-#               or `builtins.storePath` (neither carries closure
-#               information), silently producing "required file not
-#               found"/"cannot open shared object file" deep inside the
-#               sandbox instead of an eval-time error. Passing `nixPackage`
-#               as an ordinary derivation (so its full closure is tracked
-#               normally) avoids this entirely.
+#               VERSION MATCHING REQUIREMENT, confirmed by direct
+#               reproduction: `nixPackage` here and the OUTER Nix actually
+#               driving the whole build must be running compatible
+#               worker-protocol versions. Using an OLDER `nixPackage`
+#               (e.g. an ambient system/Determinate Nix, ~2.34.x) against
+#               a NEWER outer daemon fails with "Operation 19 not allowed
+#               inside derivation" (`SetOptions`, sent by the older client
+#               on connect and rejected by the newer daemon's stricter
+#               `RecursiveSubmitted`-connection allowlist) -- this is a
+#               VERSION-COMPATIBILITY issue, not a "patched vs. unpatched"
+#               one; any sufficiently old client hits it against a
+#               sufficiently new daemon, regardless of whether either one
+#               is a stock release. The fix that's always correct: use the
+#               SAME Nix build as both the outer driving Nix and
+#               `nixPackage` (see `try-it-out/run-nix.sh`, which does
+#               exactly this) -- don't mix an ambient system Nix with a
+#               separately-fetched one.
+#
+#               MUST be a properly-packaged Nix store derivation (a real
+#               flake/nixpkgs-style build, not a raw copy of a build
+#               tree's binary) -- a hand-copied binary's unregistered
+#               runtime closure and possible relative-rpath issues break
+#               once referenced by a plain string or `builtins.storePath`
+#               (neither carries closure information), silently producing
+#               "required file not found"/"cannot open shared object
+#               file" deep inside the sandbox instead of an eval-time
+#               error. Passing `nixPackage` as an ordinary derivation (so
+#               its full closure is tracked normally) avoids this
+#               entirely.
 
 {
   toDrvJson,

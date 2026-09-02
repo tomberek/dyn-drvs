@@ -23,7 +23,7 @@ let
   # doctor` can do a live probe. Exposed distinctly so `detect`'s result
   # shape doesn't change when better detection lands.
   recursiveNix = dynamicDerivations;
-  builderRpcV0 = false; # requires a patched Nix; never assume it's present
+  builderRpcV0 = false; # needs a recent-enough Nix; never assume it's present
   submitOutput = false; # ditto
 
   detect =

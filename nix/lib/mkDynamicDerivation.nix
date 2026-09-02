@@ -81,7 +81,10 @@ lib.extendMkDerivation {
       # `builder-rpc-v0`/`submit-output` support is negotiated during the
       # daemon connection handshake, not exposed through any `builtins`,
       # see `capabilities.nix`'s own header comment for the full finding).
-      # If you have a patched Nix and want `builder-rpc-v0`, pass it
+      # If you're running a Nix build recent enough to support
+      # `builder-rpc-v0` (see `try-it-out/patched-nix.nix`'s header
+      # comment -- confirmed on real NixOS/nix master since commit
+      # `55eea4554`, no patched fork needed) and want it, pass it
       # explicitly -- "auto" will not find it for you. Check
       # `passthru.backend` on the result if you need to confirm which one
       # actually got selected.
