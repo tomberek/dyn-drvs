@@ -236,3 +236,7 @@ the tradeoff does *not* favor `dyndrv` too (it's documented, not hidden).
   implemented** (only `"materialize"`, which blocks on each dependency
   immediately) — needs its own stub-file format + collecting pass,
   tracked as follow-on work.
+
+See `docs/upstream-tracking.md` for which of these trace back to a
+specific open (or recently-closed) NixOS/nix issue, rather than being a
+`dyndrv`-side gap.
