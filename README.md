@@ -57,7 +57,7 @@ Nix builds (not just designed). See `try-it-out/benchmarks/BASELINE.md`
 and the plan doc referenced in git history for full findings.
 
 - **v0.1**: core primitives (`mkDynamicDerivation`, `mkOutputOf`,
-  `wrapOutputOf`, `mkArgs`, `pathToString`, `capabilities`) and both
+  `wrapOutputOf`, `capabilities`) and both
   backends (`builder-rpc-v0` default via `viaDerivationAdd`,
   `recursive-nix` fallback via `viaNixInstantiate`).
 - **v0.2**: `graph.compile` (whole dependency-graph compilation into one

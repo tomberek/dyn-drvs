@@ -5,17 +5,19 @@
 # (recursive-nix lets a build invoke Nix itself), installing the resulting
 # `.drv` as the outer derivation's output.
 #
-# Ported from drowse's `instantiate.nix`. This is the generic primitive
-# underneath `dyndrv.builders.callPackage` (which just supplies a
-# `callPackage`-shaped expr) -- reach for `viaNixInstantiate` directly when
-# you already have an arbitrary Nix expression you want evaluated at build
-# time rather than eval time.
+# Ported from drowse's `instantiate.nix`. Pass an `expr` that does a
+# `callPackage`-style `import ./generated.nix { ... }` yourself if that's
+# your shape (drowse's own actual use case) -- there's no separate
+# `dyndrv.builders.callPackage` wrapper for it; `viaNixInstantiate` is
+# already the generic primitive for "instantiate an arbitrary Nix
+# expression at build time," and a `callPackage` call is just one such
+# expression.
 #
 # `expr`: a string of Nix source, instantiated via `nix-instantiate --expr`.
 #         If `args` is non-empty, `expr` must be a function taking one
 #         argument named `args` (i.e. `args: <expr using args>`) --
 #         mirrors drowse's `callPackage.nix` layering, generalized so any
-#         caller can cross the eval->build boundary this way, not just the
+#         caller can cross the eval->build boundary this way, not just a
 #         callPackage-specific wrapper.
 # `args`: crosses the eval->build boundary via mkArgs (JSON attrset, or a
 #         literal Nix-expression string); bound to the name `args` inside

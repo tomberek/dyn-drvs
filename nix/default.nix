@@ -1,12 +1,19 @@
 { pkgs, lib }:
 
 let
-  callLib = file: import file ({ inherit pkgs lib; } // { self = dyndrv; });
+  # `self` (bound below) is the FULL internal attrset, including plumbing
+  # (`mkArgs`, `graph.topoSort`) that other lib files call via
+  # `self.mkArgs`/`self.graph.topoSort` -- those two are genuine
+  # implementation details (used by exactly one caller each internally,
+  # never meant to be reached for directly), so they're stripped from
+  # `dyndrv`, the value this file actually returns, at the bottom. This
+  # keeps internal wiring working without publishing plumbing as if it
+  # were a first-class part of the API.
+  callLib = file: import file ({ inherit pkgs lib; } // { self = full; });
 
-  dyndrv = {
+  full = {
     capabilities = callLib ./lib/capabilities.nix;
     mkArgs = callLib ./lib/mkArgs.nix;
-    pathToString = callLib ./lib/pathToString.nix;
     mkOutputOf = callLib ./lib/mkOutputOf.nix;
     wrapOutputOf = callLib ./lib/wrapOutputOf.nix;
     mkDynamicDerivation = callLib ./lib/mkDynamicDerivation.nix;
@@ -33,4 +40,6 @@ let
     };
   };
 in
-dyndrv
+removeAttrs full [ "mkArgs" ] // {
+  graph = removeAttrs full.graph [ "topoSort" ];
+}

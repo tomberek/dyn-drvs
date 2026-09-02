@@ -8,6 +8,11 @@
 # order... callers of `viaDerivationAdd` are expected to supply `nodes` in
 # dependency order themselves"), which this supersedes for anyone going
 # through `graph.compile`.
+#
+# INTERNAL: a pure algorithm step of `graph.compile` (its only caller),
+# not a user-facing primitive -- deliberately NOT exported from
+# `nix/default.nix`'s public attrset, only reachable via
+# `self.graph.topoSort` from other lib files.
 
 nodes:
 
