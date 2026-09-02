@@ -69,8 +69,10 @@ This is the pairing the whole library is designed around: `builder-rpc-v0`
 is the better default when it's available, but nothing here forces an
 all-or-nothing bet on an unreleased Nix feature to get started.
 
-`03-graph-of-two.nix` and `04-wrap-command.nix` cover `dyndrv.graph.compile`
-(a genuinely dependent multi-node graph) and `dyndrv.shim.wrapCommand` (the
+`03-graph-of-two.nix`/`03-graph-of-three.nix` and `04-wrap-command.nix`
+cover `dyndrv.graph.compile` (genuinely dependent multi-node graphs -- two
+nodes, and a three-node diamond where the final node depends on two
+upstream nodes at once) and `dyndrv.shim.wrapCommand` (the
 $PATH-command-interception primitive `mkAcceleratedStdenv` is built from)
 respectively.
 
