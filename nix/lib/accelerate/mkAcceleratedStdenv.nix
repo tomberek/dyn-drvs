@@ -335,9 +335,10 @@ else
   # attrset `{ inherit mkDerivation; }` (rather than trying to be a real
   # `stdenv`) is deliberate: callers only ever need `.mkDerivation` from
   # this value (matching the "point this at an existing package, change
-  # one line" adoption story -- see `accelerate.wrap`, not yet
-  # implemented, which will be sugar for exactly this `.mkDerivation`
-  # substitution).
+  # one line" adoption story: `myPkg.override { stdenv =
+  # dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }` --
+  # a one-line, ordinary nixpkgs `.override` call, not a separate wrapper
+  # function).
   stdenv
   // {
     mkDerivation = lib.extendMkDerivation {

@@ -7,14 +7,15 @@ Five minutes to your first dynamic derivation.
 ```console
 $ nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
     --extra-system-features recursive-nix --store 'local?root=/tmp/dyndrv-store' \
-    -f examples/05-accelerate-wrap.nix
+    -f examples/05-accelerate-stdenv.nix
 ```
 
-`05-accelerate-wrap.nix` builds a tiny 3-file C program via
-`dyndrv.accelerate.wrap` end to end: each `cc -c` invocation becomes its
-own dynamically-produced, immediately-realized derivation, and only the
-link step passes through unaccelerated. This is the mechanism
-`try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
+`05-accelerate-stdenv.nix` builds a tiny 3-file C program via
+`dyndrv.accelerate.mkAcceleratedStdenv` end to end (an ordinary `.override`
+on the package's `stdenv` — no separate wrapper function needed): each
+`cc -c` invocation becomes its own dynamically-produced, immediately-
+realized derivation, and only the link step passes through unaccelerated.
+This is the mechanism `try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
 `real-package-patch-rebuild.sh` measure — see those (and `../README.md`'s
 own Benchmarks section) for real numbers on when this is actually worth
 adopting.
@@ -70,7 +71,7 @@ all-or-nothing bet on an unreleased Nix feature to get started.
 
 `03-graph-of-two.nix` and `04-wrap-command.nix` cover `dyndrv.graph.compile`
 (a genuinely dependent multi-node graph) and `dyndrv.shim.wrapCommand` (the
-$PATH-command-interception primitive `accelerate.wrap` is built from)
+$PATH-command-interception primitive `mkAcceleratedStdenv` is built from)
 respectively.
 
 ### 3. Not sure what your Nix supports?

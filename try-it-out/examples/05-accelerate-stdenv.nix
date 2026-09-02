@@ -1,14 +1,15 @@
-# Minimal end-to-end demo of `dyndrv.accelerate.wrap`, the lowest-friction
-# entry point in the whole library: point it at an existing, ordinary
-# `stdenv.mkDerivation`-built package and get per-translation-unit
-# caching, one line changed, no dynamic-derivation vocabulary required.
+# Minimal end-to-end demo of `dyndrv.accelerate.mkAcceleratedStdenv`, the
+# lowest-friction entry point in the whole library: override an existing
+# package's `stdenv` and get per-translation-unit caching, one attribute
+# changed, no dynamic-derivation vocabulary required.
 #
 # This example builds a tiny 3-file C program (main.c + two independent
-# "library" files) via a completely ordinary `stdenv.mkDerivation`, wrapped
-# with `dyndrv.accelerate.wrap` -- each `cc -c` invocation becomes its own
-# dynamically-produced derivation via `shim.wrapCommand`, and only the
-# link step (and, on the first build, feature-probe-style invocations, of
-# which this simple Makefile has none) passes through unaccelerated.
+# "library" files) via a completely ordinary `stdenv.mkDerivation`,
+# `.override`d to use the accelerated `stdenv` -- each `cc -c` invocation
+# becomes its own dynamically-produced derivation via `shim.wrapCommand`,
+# and only the link step (and, on the first build, feature-probe-style
+# invocations, of which this simple Makefile has none) passes through
+# unaccelerated.
 #
 # `recursive-nix`-only (inherited from `shim.wrapCommand`/
 # `mkAcceleratedStdenv`'s own v0.2 scope) -- no patched Nix needed, unlike
@@ -20,14 +21,14 @@
 # Run with:
 #   nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
 #     --extra-system-features recursive-nix --store 'local?root=/tmp/dyndrv-store' \
-#     -f try-it-out/examples/05-accelerate-wrap.nix
+#     -f try-it-out/examples/05-accelerate-stdenv.nix
 
 let
   pkgs = import <nixpkgs> { };
   lib = pkgs.lib;
   dyndrv = import ../../nix { inherit pkgs lib; };
 
-  src = pkgs.runCommand "accelerate-wrap-example-src" { } ''
+  src = pkgs.runCommand "accelerate-example-src" { } ''
     mkdir -p $out
     cat > $out/main.c <<'EOF'
     #include <stdio.h>
@@ -54,18 +55,16 @@ let
     EOF
   '';
 
-  # `dyndrv.accelerate.wrap` needs `.override`/`.stdenv` on its argument --
-  # exactly what `pkgs.callPackage` gives every ordinary nixpkgs package
-  # (confirmed directly: a bare `stdenv.mkDerivation { ... }` call has
-  # `.stdenv` but NOT `.override`, since that only comes from
-  # `lib.makeOverridable`/`callPackage` wrapping the package FUNCTION, not
-  # its result). `lib.makeOverridable` here mirrors exactly what
-  # `callPackage` does for a real package file, so this example matches
-  # what "point `accelerate.wrap` at an existing package" actually means.
+  # An ordinary `stdenv.mkDerivation`-built package, wrapped the same way
+  # `pkgs.callPackage` wraps every real nixpkgs package -- `.override`
+  # doesn't exist on a bare `stdenv.mkDerivation { ... }` call (confirmed
+  # directly: only `.stdenv` does), it comes from `lib.makeOverridable`
+  # wrapping the package FUNCTION before it's called, which is exactly
+  # what `callPackage` already does for you on any real `pkgs.foo`.
   plain = lib.makeOverridable (
     { stdenv }:
     stdenv.mkDerivation {
-      pname = "accelerate-wrap-example";
+      pname = "accelerate-example";
       version = "1.0";
       inherit src;
       installPhase = ''
@@ -75,4 +74,10 @@ let
     }
   ) { inherit (pkgs) stdenv; };
 in
-dyndrv.accelerate.wrap plain
+# The one-line change: override the `stdenv` a package is built with. No
+# separate wrapper function needed -- `.override` is ordinary nixpkgs
+# mechanics, and every real package (`pkgs.foo`, via `callPackage`)
+# already has it.
+plain.override {
+  stdenv = dyndrv.accelerate.mkAcceleratedStdenv { inherit (plain) stdenv; };
+}

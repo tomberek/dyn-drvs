@@ -89,17 +89,7 @@ try-it-out/benchmarks/  Reproducible numbers, not just README claims —
 ## Quickstart
 
 **Want to accelerate an existing C/C++ package?** No patched Nix needed,
-one line changed:
-
-```nix
-# before: pkgs.callPackage ./package.nix { }
-# after:
-dyndrv.accelerate.wrap (pkgs.callPackage ./package.nix { })
-```
-
-`dyndrv.accelerate.wrap` is sugar for overriding a package's `stdenv` with
-`dyndrv.accelerate.mkAcceleratedStdenv` — reach for that directly if you
-want to compose it yourself or need the `granularity` knob:
+one attribute changed — override the `stdenv` a package is built with:
 
 ```nix
 myPackage.override {
@@ -107,10 +97,10 @@ myPackage.override {
 }
 ```
 
-Run `try-it-out/examples/05-accelerate-wrap.nix` for a minimal, runnable
-demo of `accelerate.wrap` end to end, `try-it-out/examples/
-04-wrap-command.nix` for the underlying `shim.wrapCommand` mechanism it's
-built from, or `try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
+Run `try-it-out/examples/05-accelerate-stdenv.nix` for a minimal, runnable
+demo end to end, `try-it-out/examples/04-wrap-command.nix` for the
+underlying `shim.wrapCommand` mechanism it's built from, or
+`try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
 `real-package-patch-rebuild.sh` for the accelerator applied to real
 multi-file builds (synthetic and real-nixpkgs, respectively).
 
@@ -157,8 +147,7 @@ dyndrv.mkDynamicDerivation {
 | `dyndrv.graph.compile` | Compiles a whole dependency graph (many nodes, each possibly depending on other nodes' not-yet-built outputs) into ONE outer submission — `builder-rpc-v0` backend. |
 | `dyndrv.graph.assemble` / `.selectSink` | The two `toOutput` strategies `graph.compile` supports: merge every node's output into one tree, or return one named "sink" node's output directly. |
 | `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so each invocation becomes its own dynamically-produced, immediately-realized derivation — `recursive-nix` backend. What `accelerate.mkAcceleratedStdenv` is built from. |
-| `dyndrv.accelerate.wrap` | The lowest-friction entry point: `derivation -> derivation`, sugar for overriding an existing package's `stdenv` with `mkAcceleratedStdenv`. Point it at an existing `pkgs.callPackage`-built package, no dynamic-derivation vocabulary required. |
-| `dyndrv.accelerate.mkAcceleratedStdenv` | The composable accelerator `accelerate.wrap` is sugar over: wraps a `stdenv` so ordinary `cc -c` compiles become independent, per-translation-unit cacheable derivations. `granularity = "file"` (default) or `"package"` (no-op escape hatch). |
+| `dyndrv.accelerate.mkAcceleratedStdenv` | The lowest-friction entry point in the library: `{ stdenv }: stdenv`, for overriding an existing package's `stdenv` (`myPkg.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }`). Ordinary `cc -c` compiles become independent, per-translation-unit cacheable derivations. `granularity = "file"` (default) or `"package"` (no-op escape hatch). |
 
 ### Escape hatches
 
