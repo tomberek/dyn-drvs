@@ -7,12 +7,12 @@
 #
 # Unlike nix/tests/{mkOutputOf,nonTrivial}.nix (which only need
 # recursive-nix, working with the installed system Nix), this test needs
-# a patched Nix (builder-rpc-v0 -- see try-it-out/patched-nix.nix) and
+# `try-it-out/run-nix.sh` (builder-rpc-v0, via a fetched NixOS/nix build --
+# see try-it-out/patched-nix.nix, no patched Nix needed anymore) and
 # therefore isn't wired into nix/tests/default.nix's flake-check path.
 #
 # Run with:
-#   NIX_SRC=/path/to/nix-checkout/build-release try-it-out/run-nix.sh \
-#     build --impure -f try-it-out/examples/03-graph-of-three.nix
+#   try-it-out/run-nix.sh build --impure -f try-it-out/examples/03-graph-of-three.nix
 #
 # Verified (2026-09-02): builds a three-node graph -- a -> "a"; b, depending
 # on a -> "a\nb"; c, depending on BOTH a and b -> "a\na\nb\nc" (c's own
@@ -27,12 +27,11 @@
   pkgs ? import <nixpkgs> { },
   lib ? pkgs.lib,
   dyndrv ? import ../../nix { inherit pkgs lib; },
-  nixSrc ? /. + builtins.getEnv "NIX_SRC",
   toOutputMode ? "assemble", # "assemble" | "sink"
 }:
 
 let
-  patchedNix = (import ../patched-nix.nix { inherit pkgs; }) { inherit nixSrc; };
+  patchedNix = import ../patched-nix.nix { };
 
   coreutilsBasename = builtins.baseNameOf "${pkgs.coreutils}";
 

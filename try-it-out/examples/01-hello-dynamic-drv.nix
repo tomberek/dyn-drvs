@@ -3,8 +3,10 @@
 # registers one inner derivation via `nix derivation add` and hands it to
 # the outer derivation via `nix store submit-output`.
 #
-# Run with: try-it-out/run-nix.sh build -f try-it-out/examples/01-hello-dynamic-drv.nix
-# (requires a patched Nix -- see try-it-out/README.md)
+# Run with: try-it-out/run-nix.sh build --impure -f try-it-out/examples/01-hello-dynamic-drv.nix
+# (no patched Nix needed -- see try-it-out/patched-nix.nix's own header
+# comment: builder-rpc-v0 is on real NixOS/nix master, run-nix.sh fetches
+# and builds it directly)
 
 let
   pkgs = import <nixpkgs> { };
@@ -16,9 +18,7 @@ dyndrv.mkDynamicDerivation {
   version = "1.0";
   backend = "builder-rpc-v0";
   producer = dyndrv.builders.viaDerivationAdd {
-    nixPackage = (import ../patched-nix.nix { inherit pkgs; }) {
-      nixSrc = /. + builtins.getEnv "NIX_SRC";
-    };
+    nixPackage = import ../patched-nix.nix { };
     toDrvJson = {
       name = "hello-dyn-1.0";
       system = builtins.currentSystem;

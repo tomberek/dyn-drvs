@@ -1,28 +1,40 @@
 #!/usr/bin/env bash
-# Resolves/builds the patched Nix (try-it-out/patched-nix.nix, tracking
-# NixOS/nix#15793 for the builder-rpc-v0 backend) with the ambient system
-# Nix, then re-execs into it against a local, non-daemon store with the
-# right --extra-experimental-features/--extra-system-features baked in.
+# Fetches/builds a real, unpatched NixOS/nix commit
+# (try-it-out/patched-nix.nix) that supports `builder-rpc-v0`/`nix store
+# submit-output`, then re-execs into it against a local, non-daemon store
+# with the right --extra-experimental-features/--extra-system-features
+# baked in.
 #
-# This exists because:
+# CONFIRMED (2026-09-02): `builder-rpc-v0` needs no patched Nix at all --
+# it's on real NixOS/nix `master`, gated only by the SAME
+# `dynamic-derivations` experimental feature `dyndrv` already needs
+# everywhere else (see patched-nix.nix's own header comment for the full
+# finding). This script just fetches+builds a pinned commit via
+# `builtins.getFlake` -- no local checkout, no meson build step required.
+#
+# This still needs a LOCAL, non-daemon store (not the ambient system
+# nix-daemon) because:
 #  - the system nix-daemon's experimental-features are fixed at daemon
 #    startup and can't be overridden per-invocation (confirmed directly:
 #    passing --extra-experimental-features to `nix build` has no effect
 #    if the daemon itself doesn't have the feature enabled);
-#  - builder-rpc-v0 isn't supported by any released Nix or by the
-#    multi-user daemon at all, so a local non-daemon store is required
-#    regardless (the same workaround gradle-drvs and nix-ninja each
-#    documented independently).
+#  - the multi-user daemon doesn't support `builder-rpc-v0` regardless
+#    (same workaround gradle-drvs and nix-ninja each documented
+#    independently).
+#
+# VERSION MATCHING: this script uses the SAME fetched Nix build as both
+# the outer driving Nix and (via `viaDerivationAdd`'s `nixPackage`
+# argument, set by each example itself) the Nix running inside the
+# sandbox -- confirmed necessary by direct reproduction, see
+# patched-nix.nix's header comment.
 #
 # Usage:
 #   try-it-out/run-nix.sh build -f try-it-out/examples/01-hello-dynamic-drv.nix
 #   try-it-out/run-nix.sh eval --impure --expr '...'
 #
 # Env vars:
-#   NIX_SRC       path to a NixOS/nix#15793 checkout with a `build-release`
-#                 (or similarly named) meson build directory already built
-#                 (default: ../nix/build-release relative to this script --
-#                 override if your checkout lives elsewhere)
+#   NIX_REV       NixOS/nix commit to fetch+build (default: the commit
+#                 pinned in patched-nix.nix -- override to try a newer one)
 #   DYNDRV_STORE  local store root to build/run against (default:
 #                 /tmp/dyndrv-store, kept stable across runs so repeated
 #                 invocations reuse already-built paths)
@@ -32,22 +44,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DYNDRV_ROOT="$(dirname "$SCRIPT_DIR")"
 
-NIX_SRC="${NIX_SRC:-$SCRIPT_DIR/../../nix/build-release}"
 DYNDRV_STORE="${DYNDRV_STORE:-/tmp/dyndrv-store}"
 
-if [[ ! -e "$NIX_SRC/src/nix/nix" ]]; then
-  echo "run-nix.sh: no built Nix found at \$NIX_SRC ($NIX_SRC/src/nix/nix)." >&2
-  echo "  Set NIX_SRC to a NixOS/nix#15793 checkout with a meson build already run," >&2
-  echo "  e.g. NIX_SRC=/path/to/nix/build-release $0 ..." >&2
-  exit 1
+REV_ARG=""
+if [[ -n "${NIX_REV:-}" ]]; then
+  REV_ARG="--argstr rev $NIX_REV"
 fi
 
-PATCHED_NIX=$(nix build --impure --no-link --print-out-paths --expr "
-  let pkgs = import <nixpkgs> {};
-  in (import $DYNDRV_ROOT/try-it-out/patched-nix.nix { inherit pkgs; }) {
-    nixSrc = $NIX_SRC;
-  }
-")
+# shellcheck disable=SC2086
+# `patched-nix.nix` resolves to a multi-output derivation (has a `-man`
+# split output) -- `--print-out-paths` prints every output on its own
+# line, so `nix build ... .^out` selects ONLY the `out` output explicitly
+# (confirmed necessary by direct reproduction: without `^out`, capturing
+# `$(...)` into one variable concatenated both lines into a single,
+# unusable garbled path).
+PATCHED_NIX=$(nix build --impure --no-link --print-out-paths $REV_ARG \
+  -f "$DYNDRV_ROOT/try-it-out/patched-nix.nix" '^out')
 
 mkdir -p "$DYNDRV_STORE"
 
