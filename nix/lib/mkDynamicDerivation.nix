@@ -74,21 +74,22 @@ lib.extendMkDerivation {
     finalAttrs:
     args@{
       producer,
-      # `backend`: "auto" | "recursive-nix" | "builder-rpc-v0". Read this
-      # plainly: "auto" ALWAYS resolves to "recursive-nix" today, never
-      # "builder-rpc-v0" -- NOT "best available," because "best available"
-      # isn't eval-time computable (confirmed against Nix's own source:
-      # `builder-rpc-v0`/`submit-output` support is negotiated during the
-      # daemon connection handshake, not exposed through any `builtins`,
-      # see `capabilities.nix`'s own header comment for the full finding).
-      # If you're running a Nix build recent enough to support
-      # `builder-rpc-v0` (see `try-it-out/patched-nix.nix`'s header
-      # comment -- confirmed on real NixOS/nix master since commit
-      # `55eea4554`, no patched fork needed) and want it, pass it
-      # explicitly -- "auto" will not find it for you. Check
-      # `passthru.backend` on the result if you need to confirm which one
-      # actually got selected.
-      backend ? "auto",
+      # `backend`: "builder-rpc-v0" | "recursive-nix" | "auto". Defaults
+      # to `"builder-rpc-v0"` -- not detected, just assumed, since "best
+      # available" isn't eval-time computable (support is negotiated
+      # during the daemon connection handshake, not exposed through any
+      # `builtins` -- see `capabilities.nix`'s header). This is a policy
+      # choice: `builder-rpc-v0` is on real NixOS/nix `master` (no patched
+      # fork needed, see `try-it-out/patched-nix.nix`) and is what every
+      # backend-flexible producer here is built around.
+      #
+      # If your Nix/producer doesn't support it (e.g.
+      # `builders.viaNixInstantiate`, or a stock Nix predating
+      # `builder-rpc-v0`), pass `backend = "auto"` for the conservative,
+      # eval-time-detected choice instead (today: always `"recursive-nix"`),
+      # or `backend = "recursive-nix"` to force it directly. Check
+      # `passthru.backend` on the result to confirm what was selected.
+      backend ? "builder-rpc-v0",
       onUnsupported ? "ifd",
       ...
     }:

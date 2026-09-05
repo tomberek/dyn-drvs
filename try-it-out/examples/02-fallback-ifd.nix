@@ -30,6 +30,12 @@ dyndrv.capabilities.withFallback {
   dynamic = dyndrv.mkDynamicDerivation {
     pname = "hello-fallback";
     version = "1.0";
+    # `viaNixInstantiate` only supports "recursive-nix", and
+    # `withFallback`'s decision to try this branch is based on
+    # `capabilities.selectBackend`'s detected pick -- so this branch asks
+    # for that same resolution via `backend = "auto"`, rather than relying
+    # on `mkDynamicDerivation`'s unset default ("builder-rpc-v0").
+    backend = "auto";
     onUnsupported = "fail"; # withFallback already decided this branch is safe to try
     producer = dyndrv.builders.viaNixInstantiate {
       expr = helloExpr;

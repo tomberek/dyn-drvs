@@ -37,7 +37,81 @@
 #   (one derivation per `-c` invocation, the default and the whole point
 #   of the feature) and `"package"` (a pure no-op passthrough, useful for
 #   bisecting whether acceleration itself is the cause of a build
-#   problem). `"module"` batching is follow-on work.
+#   problem).
+#
+#   `"module"` (directory-batched compiles): built on `shim.wrapCommand`'s
+#   `defer` mode plus the `shim.wrapArchiver` companion shim on `ar` --
+#   NOT a live-shim buffering trick (that's impossible: a live shim must
+#   synchronously hand back a real `.o` before `make` continues, so
+#   there's no point to buffer several files' compiles into one
+#   registered derivation without either compiling for real before
+#   registering, which throws away caching, or blocking across
+#   invocations, which risks deadlock under `make -j1`). Instead, a
+#   batched compile's `cc` invocation writes a batch-pending STUB (a real
+#   file satisfying `make`'s `test -e` check, but not a real object --
+#   see `shim/batchStub.nix`) and returns immediately, with zero compile
+#   work done; the deferred work only runs when `ar` later collects every
+#   member of one batch group into ONE registered, realized derivation
+#   (compiling every member for real, then archiving them). This mirrors
+#   nixgg's own `batch`/`batchpending`/`batcharchive` design -- see
+#   `shim/wrapCommand.nix` and `shim/wrapArchiver.nix` for the mechanism,
+#   which required generalizing `wrapCommand` so ONE shim instance can mix
+#   `materialize` (the default) and `defer` PER INVOCATION, decided at
+#   runtime by `toNode`'s own return shape -- not a single static setting
+#   for the whole shim, since only SOME files (the ones `shouldBatch`
+#   opts in) should ever defer.
+#
+#   `shouldBatch` (required when `granularity = "module"`, ignored
+#   otherwise): a function `relativeSourcePath -> bool`, deciding which
+#   files batch and which stay `"file"`-granularity, UNCONDITIONALLY
+#   OPT-IN per path -- matching nixgg's own `batch.Config`/`shouldBatch`
+#   design. Batching an actively-edited directory trades saved
+#   registration overhead for wasted real-compiler time on unchanged
+#   siblings on every edit, so there is no safe automatic default --
+#   `shouldBatch` defaults to `_: false` (nothing batches) if omitted,
+#   which is simply `"file"` granularity's own existing behavior.
+#
+#   HOW `shouldBatch` crosses the eval/build boundary: `toNode`'s
+#   generated text is `nix-instantiate`d STANDALONE inside the sandbox,
+#   with no access to any outer Nix closure -- an ordinary Nix function
+#   value can't cross that boundary, only data or literal source text can
+#   (the same reason `toNode`/`discoverTree` are plain STRINGS, not real
+#   functions). So `shouldBatch` is evaluated ONCE, at ordinary Nix eval
+#   time, against every file found under `args.src` (recursively) --
+#   producing a concrete `{ <relative-path> = <groupKey>; }` mapping
+#   (directory-based grouping) that gets spliced into `toNode` as literal
+#   JSON data, not a closure. This is a deliberate tradeoff: walking
+#   `args.src` this way triggers a REAL eval-time build (import-from-
+#   derivation), accepted ONLY for `granularity = "module"` -- `"file"`
+#   (the default) never touches `args.src` this way and stays fully
+#   IFD-free. A file present in the Makefile's own build graph but NOT
+#   present under `args.src` at eval time (e.g. a build-generated `.c`
+#   file) is simply never eligible for batching, and silently falls back
+#   to ordinary `"file"`-granularity behavior for that one file.
+#
+#   SCOPE LIMIT: `"module"` granularity uses the same flat per-file
+#   store-staging strategy `discoverTree` mode uses for header discovery,
+#   but batched members' individually-staged trees are merged,
+#   sequentially, into ONE shared working directory inside the combined
+#   derivation. This is correct for the common case (files in the same
+#   batch directory referencing shared, identical-content local headers)
+#   but has a real, documented gap: if two DIFFERENT batched members
+#   would stage a DIFFERENT file at the SAME relative path, the later
+#   member's copy silently wins, with no detection or error (matches
+#   nixgg's own `disambiguateOutNames` finding for a different collision
+#   class -- object-file naming, not staged-tree paths -- which this file
+#   does not yet implement an equivalent guard for).
+#
+#   For anyone who already has (or can generate) an explicit list of
+#   nodes rather than a live Makefile -- gradle-drvs'/sandstone's actual
+#   shape -- `dyndrv.graph.compile`'s `group` field plus `dyndrv.graph.
+#   groupByDirectory` is the lower-level, more general mechanism this
+#   accelerator's `"module"` mode is built on top of in spirit (though
+#   NOT literally: `wrapArchiver.nix` has its own independent combined-
+#   derivation renderer, since `graph.compile`'s renderer assumes a
+#   fully-known-up-front node graph, which a live Makefile interception
+#   can't provide -- see `try-it-out/examples/03-graph-with-groups.nix`/
+#   `03-graph-groupby-directory.nix` for that direct-graph-compile path).
 #
 # DIRECTORY-STRUCTURE / HEADER-DISCOVERY (added after direct reproduction
 # against a real nixpkgs package, openssl): a real multi-directory C
@@ -64,12 +138,23 @@
 {
   stdenv,
   granularity ? "file",
+  # See header comment's `shouldBatch` section -- only consulted when
+  # `granularity = "module"`; `_: false` matches `"file"`'s own behavior
+  # exactly (nothing ever batches).
+  shouldBatch ? (_: false),
 }:
 
-assert builtins.elem granularity [ "file" "package" ];
+assert builtins.elem granularity [ "file" "module" "package" ];
 
 let
   realCc = "${stdenv.cc}/bin/cc";
+  # The real `ar`/`ranlib` binaries live under `stdenv.cc.bintools.bintools`,
+  # not `stdenv.cc` -- a different nixpkgs wrapper package. That package's
+  # own setup hook exports `AR=ar` (the bare name, not a full path), same
+  # "wrapper exports the bare name" gotcha as `CC=gcc`/`CXX=g++` above --
+  # `AR` must be overridden explicitly for the `ar` shim to intercept a
+  # real Makefile's `$(AR)` invocation.
+  realAr = "${stdenv.cc.bintools.bintools}/bin/ar";
 
   # Runs BEFORE `toNode` (inside `wrapCommand`'s wrapper script, per
   # `discoverTree`'s contract -- see wrapCommand.nix's header comment):
@@ -119,6 +204,15 @@ let
   # compile needs. The generated builder `cp -r`s that tree into its cwd
   # and then runs the compile with argv COMPLETELY UNCHANGED, so relative
   # `-I` flags resolve exactly as they would in the real build tree.
+  #
+  # SHARED across `granularity = "file"`/`"module"` (this one `toNode`
+  # text and the `ccShim`/`wrapperDir` built from it are never duplicated
+  # per-mode): `DYNDRV_BATCH_GROUPS` (same env-var-crossing convention as
+  # `DYNDRV_TREE_BASENAME`) is read unconditionally here too, defaulting
+  # to `{}` when unset/empty (what `"file"`/`"package"` mode's
+  # `extendDrvArgs` leaves it, since only `"module"` mode ever sets it) --
+  # so for every mode except an explicitly-batched file under `"module"`,
+  # `batchKey` below is always `null` and behavior is unchanged.
   toNode = ''
     argv:
     let
@@ -169,9 +263,20 @@ let
         in
         if n <= 1 then s
         else builtins.concatStringsSep "." (builtins.genList (i: builtins.elemAt segments i) (n - 1));
-      implicitOutputFile =
-        if firstSourceIdx == (-1) then null
-        else (stripExt (builtins.baseNameOf (builtins.elemAt argv firstSourceIdx))) + ".o";
+      sourcePath = if firstSourceIdx == (-1) then null else builtins.elemAt argv firstSourceIdx;
+      implicitOutputFile = if sourcePath == null then null else (stripExt (builtins.baseNameOf sourcePath)) + ".o";
+
+      # `batchGroupOf`: `{ <relative-source-path> = <groupKey>; }`, built
+      # outside the sandbox and threaded across the eval/build boundary
+      # via `DYNDRV_BATCH_GROUPS` (see this file's header comment for the
+      # full "why"). `builtins.getEnv` returns `""` when unset (the
+      # `"file"`/`"package"`-mode case, and any `"module"`-mode compile
+      # whose source wasn't found under `args.src` at eval time), treated
+      # as `{}` -- `batchKey` is then always `null` and the compile
+      # proceeds exactly as `"file"` granularity always has.
+      batchGroupOfRaw = builtins.getEnv "DYNDRV_BATCH_GROUPS";
+      batchGroupOf = if batchGroupOfRaw == "" then { } else builtins.fromJSON batchGroupOfRaw;
+      batchKey = if sourcePath == null then null else (batchGroupOf.''${sourcePath} or null);
     in
     if !hasCompileFlag || (outIdx == (-1) && implicitOutputFile == null) then
       null
@@ -229,7 +334,12 @@ let
         # unrelated to whatever relative path the caller named), this
         # replaces IN PLACE at `outIdx + 1` rather than filtering it out
         # and appending anew, preserving every other flag's original
-        # relative position.
+        # relative position. `argvForCc` (with the literal sentinel
+        # string `"$out"`, unquoted) is used both for the materialize
+        # branch's shell-quoted command line below AND, verbatim, as a
+        # deferred batch member's own `record.args` -- `wrapArchiver`
+        # applies its own shell-quoting downstream, so this array must
+        # stay unquoted here.
         argvForCc =
           if outIdx != (-1) then
             builtins.genList (
@@ -273,29 +383,70 @@ let
         extraStorePaths = builtins.attrNames (
           builtins.listToAttrs (map (n: { name = n; value = null; }) extraStorePathsRaw)
         );
+        # Same input set EITHER branch below needs -- shared here once
+        # rather than duplicated.
+        srcsList = [
+          (builtins.baseNameOf "${pkgs.coreutils}")
+          (builtins.baseNameOf "${stdenv.cc}")
+          treeBasename
+        ] ++ extraStorePaths;
       in
-      {
-        drvJson = builtins.toJSON {
-          name = "dyndrv-cc-''${builtins.baseNameOf outputFile}";
-          system = builtins.currentSystem;
-          builder = "/bin/sh";
-          args = [
-            "-c"
-            "${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${stdenv.cc}/bin/cc ''${quotedArgs}"
-          ];
-          env.out = builtins.placeholder "out";
-          inputs = {
-            drvs = { };
-            srcs = [
-              (builtins.baseNameOf "${pkgs.coreutils}")
-              (builtins.baseNameOf "${stdenv.cc}")
-              treeBasename
-            ] ++ extraStorePaths;
-          };
-          outputs.out = { method = "nar"; hashAlgo = "sha256"; };
-          version = 4;
-        };
-      }
+      (
+        if batchKey != null then
+          # DEFER: this compile is opted into a batch group -- write a
+          # batch-pending stub instead of registering/realizing anything
+          # now; `shim.wrapArchiver` (installed on `ar`) collects every
+          # same-group member into ONE combined derivation later.
+          # `setupCmd` mirrors the materialize branch's own `cp -r`
+          # staging line, since `toNode` here is ALWAYS in `discoverTree`
+          # mode -- every member needs its own discovered tree staged
+          # before compiling.
+          {
+            defer = {
+              record = builtins.toJSON {
+                key = batchKey;
+                tool = "${realCc}";
+                args = argvForCc;
+                srcs = srcsList;
+                # `chmod -R u+w` before `cp -r`: a batched member's own
+                # staged tree can collide, path-for-path, with an earlier
+                # member's already-staged tree in the same shared working
+                # directory (e.g. two files sharing a local header). Nix
+                # store inputs are read-only, and `cp -r` preserves the
+                # source's permissions on the destination -- so a second
+                # `cp -r` onto an already-copied, read-only directory
+                # fails with "Permission denied" even for byte-identical
+                # content (`cp -f` alone doesn't help, since removing a
+                # file needs its PARENT directory writable). `chmod -R
+                # u+w .` on the shared working directory before each
+                # member's `cp -r` guarantees every copy can overwrite.
+                # This does NOT guard against two members staging
+                # DIFFERENT content at the same relative path -- see this
+                # file's header comment's scope-limit note.
+                setupCmd = "${pkgs.coreutils}/bin/chmod -R u+w . && ${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . &&";
+              };
+            };
+          }
+        else
+          {
+            drvJson = builtins.toJSON {
+              name = "dyndrv-cc-''${builtins.baseNameOf outputFile}";
+              system = builtins.currentSystem;
+              builder = "/bin/sh";
+              args = [
+                "-c"
+                "${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${stdenv.cc}/bin/cc ''${quotedArgs}"
+              ];
+              env.out = builtins.placeholder "out";
+              inputs = {
+                drvs = { };
+                srcs = srcsList;
+              };
+              outputs.out = { method = "nar"; hashAlgo = "sha256"; };
+              version = 4;
+            };
+          }
+      )
       // (if outIdx != (-1) then { outputArg = outIdx + 1; } else { outputPath = implicitOutputFile; })
   '';
 
@@ -303,6 +454,11 @@ let
     command = "cc";
     realCommand = realCc;
     inherit toNode discoverTree;
+  };
+
+  arShim = self.shim.wrapArchiver {
+    command = "ar";
+    realCommand = realAr;
   };
 
   # cc-wrapper's own setup hook exports `CC=gcc` (the real compiler's
@@ -313,11 +469,15 @@ let
   # build actually calls. The wrapper is installed under BOTH names
   # (`cc` and `gcc`) and `CC`/`CXX` are also overridden explicitly, so
   # this works regardless of which name-and-lookup convention a given
-  # Makefile/build system happens to use.
+  # Makefile/build system happens to use. Built unconditionally (shared
+  # across every `granularity` value) -- installing an unused `ar` shim
+  # costs nothing for `"file"`/`"package"` mode, since only `"module"`
+  # mode's `extendDrvArgs` branch below overrides `AR` to point at it.
   wrapperDir = pkgs.runCommand "dyndrv-cc-shim" { } ''
     mkdir -p $out/bin
     install -Dm755 ${pkgs.writeText "cc" ccShim.wrapperScript} $out/bin/cc
     ln -s cc $out/bin/gcc
+    install -Dm755 ${pkgs.writeText "ar" arShim.wrapperScript} $out/bin/ar
   '';
 in
 if granularity == "package" then
@@ -350,6 +510,42 @@ else
           requiredSystemFeatures = (args.requiredSystemFeatures or [ ]) ++ [ "recursive-nix" ];
           CC = "${wrapperDir}/bin/cc";
           CXX = "${wrapperDir}/bin/cc";
-        };
+        }
+        // lib.optionalAttrs (granularity == "module") (
+          let
+            # Collects every REGULAR file's path relative to `args.src`'s
+            # own root, via nixpkgs' own `lib.filesystem.
+            # listFilesRecursive` rather than a hand-rolled walk. This
+            # triggers a REAL eval-time build (import-from-derivation),
+            # accepted only here -- `"file"` granularity never reaches
+            # this branch and stays fully IFD-free.
+            #
+            # `unsafeDiscardStringContext` is required: `toString` on a
+            # path from `listFilesRecursive` carries string CONTEXT (a
+            # dependency on `args.src`'s own derivation) that
+            # `removePrefix` doesn't strip -- without discarding it, Nix
+            # rejects the resulting "relative path" string when it's
+            # later used as a plain env var value ("is not allowed to
+            # refer to a store path"), even though the string's actual
+            # text is just a relative path.
+            srcRoot = toString args.src;
+            allSrcFiles = map (
+              f: builtins.unsafeDiscardStringContext (lib.removePrefix (srcRoot + "/") (toString f))
+            ) (lib.filesystem.listFilesRecursive args.src);
+            batchedFiles = builtins.filter shouldBatch allSrcFiles;
+            # Directory-based grouping -- every batched file's own group
+            # key is simply its containing directory.
+            batchGroupOf = builtins.listToAttrs (
+              map (p: {
+                name = p;
+                value = lib.dirOf p;
+              }) batchedFiles
+            );
+          in
+          {
+            DYNDRV_BATCH_GROUPS = builtins.toJSON batchGroupOf;
+            AR = "${wrapperDir}/bin/ar";
+          }
+        );
     };
   }

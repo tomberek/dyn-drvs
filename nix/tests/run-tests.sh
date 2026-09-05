@@ -71,5 +71,19 @@ run_test "nonTrivial (oracle: non-trivial.nix, descoped to independent nodes)" "
   ''
 "
 
+run_test "defaultBackend (unset backend defaults to builder-rpc-v0, not detected)" "
+  let
+    pkgs = import <nixpkgs> {};
+    lib = pkgs.lib;
+    dyndrv = import $DYNDRV_ROOT/nix { inherit pkgs lib; };
+    result = import $DYNDRV_ROOT/nix/tests/defaultBackend.nix { inherit pkgs lib dyndrv; };
+  in
+  pkgs.runCommand \"defaultBackend-test-result\" {
+    passStr = builtins.toJSON result.pass;
+  } ''
+    echo \"{\\\"pass\\\":\$passStr}\" > \$out
+  ''
+"
+
 echo ""
 echo "All tests passed."

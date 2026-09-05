@@ -15,6 +15,15 @@
 # since projects that turn one on generally turn both on together." A real
 # probe (attempt a trivial build, see if it schedules) is deferred to the
 # `dyndrv doctor` CLI (v0.2+), which can afford to actually run a build.
+#
+# NOTE: `builderRpcV0`/`submitOutput` stay hardcoded `false` here even
+# though `mkDynamicDerivation`'s own unset default is now
+# `backend = "builder-rpc-v0"` -- not a contradiction. This module
+# answers "what can I safely assume without being told otherwise," and
+# that support genuinely isn't eval-time detectable, so the honest
+# answer stays `false`. `mkDynamicDerivation`'s default is a separate
+# policy choice a caller opts out of via `backend = "auto"`, which routes
+# through `selectBackend` below to get this module's conservative answer.
 
 let
   dynamicDerivations = builtins ? outputOf;

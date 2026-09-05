@@ -11,31 +11,24 @@
 # ~1000+ lines of bash+jq/Haskell; `graph.compile` is that algorithm
 # written once.
 #
-# ARCHITECTURE NOTE (resolved 2026-08-31, see plan's "RESOLVED" sections):
-# this compiles the WHOLE graph into ONE generated bash script that
-# registers every node via `nix derivation add`, rather than calling
-# `dyndrv.builders.viaDerivationAdd` once per node and gluing the results
-# together afterward -- the latter cannot work, because crossing the
+# ARCHITECTURE: this compiles the WHOLE graph into ONE generated bash
+# script that registers every node via `nix derivation add`, rather than
+# calling `dyndrv.builders.viaDerivationAdd` once per node and gluing the
+# results together afterward -- the latter can't work, since crossing the
 # eval->build (JSON) boundary per-node loses Nix's own dependency-tracking
-# string context (confirmed directly: this is why v0.1's `viaDerivationAdd`
-# stayed single-node). `graph.compile` is therefore its own producer
-# constructor (returning the same `{ script, extraDrvArgs }` shape
-# `mkDynamicDerivation.nix`'s header comment defines as "the producer
-# contract" -- despite living under `graph.*` rather than `builders.*`,
-# it's exactly as valid a `producer` as `builders.viaDerivationAdd`, just
-# one that internally orchestrates a whole graph of nodes instead of one),
-# not a wrapper around N `viaDerivationAdd` calls.
+# string context. `graph.compile` is its own producer constructor
+# (returning the `{ script, extraDrvArgs }` shape `mkDynamicDerivation.nix`
+# defines as "the producer contract"), not a wrapper around N
+# `viaDerivationAdd` calls.
 #
 # v0.2 SCOPE: implements the `builder-rpc-v0` backend only (the natural
 # fit -- `nix derivation add`'s JSON schema already has `inputs.drvs`).
 # `viaNixInstantiate`/`recursive-nix` multi-node graphs need their own
-# single-composed-Nix-expression codegen (confirmed to work in principle,
-# see the plan's "RESOLVED" note on question 1) but are follow-on work,
-# not implemented here yet -- `graph.compile { backend = "recursive-nix"; }`
-# throws a clear "not yet implemented" error rather than silently doing
-# the wrong thing.
+# single-composed-Nix-expression codegen -- follow-on work, not
+# implemented here; `graph.compile { backend = "recursive-nix"; }` throws
+# a clear "not yet implemented" error.
 #
-# `nodes`: an attrset `{ <name> = { deps = [ <name> ... ]; mkDrv = { ref }: {...}; }; }`.
+# `nodes`: an attrset `{ <name> = { deps = [ <name> ... ]; group = null; mkDrv = { ref }: {...}; }; }`.
 #   - `deps`: names of other nodes this node depends on. `graph.compile`
 #     wires these into the registered derivation's `inputs.drvs`
 #     automatically (using each dep's ACTUAL registered basename, known
@@ -46,38 +39,61 @@
 #     `ref depName` returns a sentinel string that the generated builder
 #     script substitutes, at BUILD time, for the real
 #     `DownstreamPlaceholder::unknownCaOutput` placeholder of that
-#     dependency's actual registered output -- computed via
-#     `dyndrv.placeholder`'s verified formula, ported to bash, once the
-#     dependency has actually been registered (its real drvPath/hashPart
-#     is only knowable then). `ref "self"` is the sentinel for THIS node's
-#     own output (same self-reference convention `viaDerivationAdd.nix`
-#     already established).
+#     dependency's actual registered output, once the dependency has
+#     actually been registered (its real drvPath/hashPart is only
+#     knowable then). `ref "self"` is the sentinel for THIS node's own
+#     output.
+#   - `group` (optional, default `null`): a plain string key. Every node
+#     sharing the SAME `group` string is merged into ONE registered
+#     derivation (one `nix derivation add` call instead of N), with one
+#     distinctly-NAMED output per member instead of each getting its own
+#     "out"-named derivation -- the one mechanism this library provides
+#     for consolidating a fine-grained graph into coarser sub-components.
+#     A `group` shared by only one node (or left `null`) is exactly
+#     equivalent to no grouping -- existing callers that never set
+#     `group` are byte-for-byte unaffected. See "Merging mechanics" below
+#     for the constraint merged members' `mkDrv` must satisfy.
+#
+# MERGING MECHANICS (only relevant to nodes that share a `group`): a
+# merged group's members are compiled SEQUENTIALLY inside ONE generated
+# `/bin/sh -c` script, in the same relative order `graph.topoSort`
+# already establishes for the whole graph (a subsequence of a valid
+# topological order remains valid for the induced subgraph) -- so a
+# member referencing a fellow member's output can rely on it having
+# already been written. A merged member's `mkDrv` MUST return `builder =
+# "/bin/sh"; args = [ "-c" "<cmd referencing its own output as $out>" ];`
+# -- `graph.compile` rewrites the literal substring `$out` to the
+# member's own output variable (`$<memberName>`) when folding it into the
+# merged unit's script; a member whose `mkDrv` doesn't follow this shape
+# throws a clear error. `ref "self"` and `ref "<fellowMemberName>"` both
+# resolve via the plain, drvPath-independent `hashPlaceholder` formula
+# (no cross-derivation lookup needed, since both are outputs of the same
+# not-yet-registered derivation) -- only a reference to a node OUTSIDE
+# the group still goes through the cross-node
+# `DownstreamPlaceholder::unknownCaOutput` mechanism, generalized to ask
+# for that dependency's own registered output name rather than assuming
+# "out".
 #
 # `toOutput`: how the graph's many node outputs become the ONE output the
-#   outer derivation submits (Nix's builder-rpc-v0/recursive-nix mechanisms
-#   only allow one submitted output per outer derivation):
+#   outer derivation submits (builder-rpc-v0/recursive-nix only allow one
+#   submitted output per outer derivation):
 #   - `"assemble"` (default) -- synthesizes one additional "assembler" node
 #     that copies every other node's output into one directory tree
-#     (gradle-drvs' own pattern: copy every fetched artifact into one tree).
+#     (gradle-drvs' own pattern).
 #   - `{ sink = "<nodeName>"; }` -- submit that one named node's output
 #     directly (sandstone's pattern: only the final linked binary matters).
-#     A trivial rename node is still synthesized if the sink's own name
-#     doesn't already match what the outer wrapper expects (the "inner/
-#     outer derivation names must match exactly" constraint confirmed in
-#     v0.1, applied automatically so callers never have to think about it).
+#     A trivial rename node is synthesized if the sink's own name doesn't
+#     already match what the outer wrapper expects.
 #
-# `nixPackage`: same as `viaDerivationAdd.nix` -- the patched Nix to run
+# `nixPackage`: same as `viaDerivationAdd.nix` -- the Nix to run
 #   `nix derivation add`/`nix store submit-output` with, inside the sandbox.
 #
 # `name`: MUST match the outer `mkDynamicDerivation` call's expected inner
-#   name exactly (i.e. `"${pname}-${version}"`, same "inner/outer names
-#   must match exactly" constraint documented in mkDynamicDerivation.nix --
-#   confirmed by direct reproduction: without this, the synthesized
-#   assembler/sink-rename node's name mismatches what the outer wrapper
-#   expects and realization fails with "output ... was named ..., expected
-#   ..."). Individual graph NODES are free to have any name (they're
-#   intermediate/never directly exposed); only the FINAL node (the
-#   assembler, or the renamed sink) needs to match.
+#   name exactly (i.e. `"${pname}-${version}"`) -- without this, the
+#   synthesized assembler/sink-rename node's name mismatches what the
+#   outer wrapper expects and realization fails. Individual graph nodes
+#   are free to have any name; only the final node (the assembler, or the
+#   renamed sink) needs to match.
 
 {
   nodes,
@@ -89,65 +105,187 @@
 let
   order = self.graph.topoSort nodes;
 
-  # `ref "self"` reuses the existing self-reference sentinel convention
-  # from viaDerivationAdd.nix (substituted via `builtins.placeholder`,
-  # since a node's own not-yet-known output uses the fixed, name-only
-  # hashPlaceholder formula, not the cross-node unknownCaOutput one).
-  # `ref "<otherNode>"` uses the cross-node sentinel, substituted via the
-  # dyndrv_placeholder bash function once that node is registered.
-  refSentinel = name: if name == "self" then "@dyndrv-placeholder:out@" else "@dyndrv-node-placeholder:${name}@";
+  # Every node belongs to a "unit" -- the thing that actually becomes ONE
+  # `nix derivation add` call. An ungrouped node is its own solo unit,
+  # output named literally "out". A node with `group` set shares a unit
+  # with every other node that set the exact same `group` string; a
+  # unit's members become that ONE derivation's distinctly-named outputs
+  # (named after each member's own node name).
+  isSolo = nodeName: (nodes.${nodeName}.group or null) == null;
+  unitKeyOf = nodeName: if isSolo nodeName then "__solo:${nodeName}" else nodes.${nodeName}.group;
+  outputNameOf = nodeName: if isSolo nodeName then "out" else nodeName;
 
-  renderNode =
-    name:
+  membersByUnit = lib.groupBy unitKeyOf order; # unitKey -> [ nodeName ], relative order preserved
+
+  # Keeping intra-unit relative order isn't enough to order UNITS
+  # themselves: grouping can put topologically distant nodes in the same
+  # unit, so two units' relative registration order must still respect
+  # any dependency edge crossing between them. Reuses `graph.topoSort`
+  # unchanged -- a unit graph is the same `{ <name> = { deps = [...] }; }`
+  # shape `topoSort` already handles.
+  unitGraphNodes = lib.mapAttrs (
+    unitKey: members:
+    {
+      deps = lib.unique (
+        lib.filter (u: u != unitKey) (lib.concatMap (m: map unitKeyOf (nodes.${m}.deps or [ ])) members)
+      );
+    }
+  ) membersByUnit;
+  unitOrder = self.graph.topoSort unitGraphNodes;
+
+  # `ref` as seen by a given node `fromName`'s own `mkDrv`. "self" means
+  # "my own output". A reference to a fellow member of the SAME unit
+  # (including self) resolves via the plain, drvPath-independent
+  # `hashPlaceholder` formula (`@dyndrv-self-placeholder:<outputName>@`);
+  # a reference crossing into a DIFFERENT unit needs the real
+  # `DownstreamPlaceholder::unknownCaOutput` formula against that unit's
+  # own, only-known-at-build-time drvPath
+  # (`@dyndrv-node-placeholder:<unitKey>:<outputName>@`).
+  refSentinelFor =
+    fromName: toName:
     let
-      node = nodes.${name};
-      drv = node.mkDrv { ref = refSentinel; };
-      depsList = node.deps or [ ];
+      toName' = if toName == "self" then fromName else toName;
+      toOutputName = outputNameOf toName';
+    in
+    if unitKeyOf fromName == unitKeyOf toName' then
+      "@dyndrv-self-placeholder:${toOutputName}@"
+    else
+      "@dyndrv-node-placeholder:${unitKeyOf toName'}:${toOutputName}@";
+
+  # A node's own `{ unit, outputName }` reference pair -- shared by
+  # `externalRefsOf` (a unit's deps) and `finalNode` (the outer wrapper's
+  # own view of a node).
+  refOf = n: {
+    unit = unitKeyOf n;
+    outputName = outputNameOf n;
+  };
+
+  # Every (unit, outputName) pair any member of THIS unit references
+  # outside the unit -- drives both `inputs.drvs` wiring and cross-unit
+  # placeholder substitution for the generated script.
+  externalRefsOf =
+    unitKey: members:
+    lib.unique (
+      lib.concatMap (
+        m: map refOf (lib.filter (dep: unitKeyOf dep != unitKey) (nodes.${m}.deps or [ ]))
+      ) members
+    );
+
+  # Renders ONE unit into `{ unitKey, selfOutputNames, externalRefs,
+  # drvJson }`. A solo unit renders identically to a single ungrouped
+  # node's own `mkDrv` JSON -- so a caller that never sets `group` sees
+  # zero behavioral change. A real unit (2+ members, or an explicit
+  # single-member `group`) synthesizes one merged, multi-output
+  # derivation instead.
+  renderUnit =
+    unitKey:
+    let
+      members = membersByUnit.${unitKey};
+      drvsOf = map (m: {
+        member = m;
+        drv = nodes.${m}.mkDrv { ref = refSentinelFor m; };
+      }) members;
     in
     {
-      inherit name depsList;
-      drvJson = builtins.toJSON (
-        drv
-        // {
-          version = drv.version or 4;
-        }
-      );
+      inherit unitKey;
+      selfOutputNames = map outputNameOf members;
+      externalRefs = externalRefsOf unitKey members;
+      drvJson =
+        if builtins.length members == 1 && isSolo (builtins.head members) then
+          let
+            only = builtins.head drvsOf;
+          in
+          builtins.toJSON (only.drv // { version = only.drv.version or 4; })
+        else
+          let
+            # Every merged member's mkDrv must use the `/bin/sh -c
+            # "<cmd>"` shape -- enforced here with a clear error, since a
+            # merged unit's builder script is these commands
+            # CONCATENATED, not one member's verbatim JSON.
+            cmdOf =
+              d:
+              if
+                (d.drv.builder or null) != "/bin/sh" || (d.drv.args or [ ]) == [ ] || builtins.elemAt d.drv.args 0
+                != "-c"
+              then
+                throw ''
+                  dyndrv.graph.compile: node "${d.member}" is grouped
+                  (group = "${unitKey}") but its mkDrv didn't return the
+                  required `builder = "/bin/sh"; args = [ "-c" "<cmd>" ];`
+                  shape -- grouped nodes' commands are concatenated into
+                  one script, so this exact shape is required (see
+                  graph/compile.nix's "MERGING MECHANICS" header comment).
+                ''
+              else
+                builtins.elemAt d.drv.args 1;
+            # Env vars are named after their OUTPUT, per Nix's derivation
+            # ABI (output "a" is seen as `$a` inside the builder, just
+            # like a solo derivation's "out" is seen as `$out`) -- so
+            # each member's own `$out` reference is rewritten to its own
+            # member-named output variable before concatenation.
+            rewrittenCmdOf = d: lib.replaceStrings [ "$out" ] [ ("$" + d.member) ] (cmdOf d);
+            combinedCmd = lib.concatMapStringsSep "; " rewrittenCmdOf drvsOf;
+          in
+          builtins.toJSON {
+            name = "dyndrv-group-${unitKey}";
+            system = builtins.currentSystem;
+            builder = "/bin/sh";
+            args = [
+              "-c"
+              combinedCmd
+            ];
+            env = lib.genAttrs members (m: "@dyndrv-self-placeholder:${m}@");
+            inputs = {
+              drvs = { };
+              srcs = lib.unique (lib.concatMap (d: d.drv.inputs.srcs or [ ]) drvsOf);
+            };
+            outputs = lib.genAttrs members (m: {
+              method = "nar";
+              hashAlgo = "sha256";
+            });
+            version = 4;
+          };
     };
 
-  rendered = map renderNode order;
+  renderedUnits = map renderUnit unitOrder;
 
   sinkName = if builtins.isAttrs toOutput then toOutput.sink else null;
 
   needsAssemblerNode = toOutput == "assemble";
 
-  # The final node MUST be named exactly `name` (the outer wrapper's
-  # expected inner name) -- so both the "assemble" and "sink" cases
-  # synthesize one small final node with that exact name, rather than
-  # trying to rename an existing node in place (a node's OWN name is
-  # already baked into its registered .drv, immutable after registration).
+  # The final node MUST be named exactly `name` -- so both the "assemble"
+  # and "sink" cases synthesize one small final node with that exact
+  # name, rather than renaming an existing node in place (a node's own
+  # name is already baked into its registered .drv). This final node is
+  # always its own solo unit -- never grouped -- so it goes through the
+  # same generic per-unit script generation below, just appended after
+  # `unitOrder`.
   #
   # "assemble": copies every real node's output into one directory tree
-  # via symlinks, mirroring gradle-drvs' own assembler derivation exactly.
+  # via symlinks, mirroring gradle-drvs' own assembler derivation.
   # "sink": a trivial single-symlink passthrough to the named sink node's
-  # output (sandstone's pattern: only the final linked binary matters).
+  # output (sandstone's pattern).
   finalNode =
     let
       copyLines =
         if needsAssemblerNode then
-          map (n: ''${pkgs.coreutils}/bin/ln -s "@dyndrv-node-placeholder:${n}@" "$out/${n}"'') order
+          map (
+            n: ''${pkgs.coreutils}/bin/ln -s "@dyndrv-node-placeholder:${unitKeyOf n}:${outputNameOf n}@" "$out/${n}"''
+          ) order
         else
-          [ ''${pkgs.coreutils}/bin/ln -s "@dyndrv-node-placeholder:${sinkName}@" "$out"'' ];
-      # `inputs.srcs` wants a bare BASENAME, not a full store path
-      # (confirmed empirically: a full path fails with "'' is too short
-      # to be a valid store path" -- matches nixgg's own documented
-      # gotcha exactly). Declares coreutils as an input so `mkdir`/`ln`
-      # are usable by absolute path -- a `builder-rpc-v0`-registered
-      # derivation has no ambient $PATH.
+          [
+            ''${pkgs.coreutils}/bin/ln -s "@dyndrv-node-placeholder:${unitKeyOf sinkName}:${outputNameOf sinkName}@" "$out"''
+          ];
+      # `inputs.srcs` wants a bare basename, not a full store path.
+      # Declares coreutils as an input so `mkdir`/`ln` are usable by
+      # absolute path -- a `builder-rpc-v0`-registered derivation has no
+      # ambient $PATH.
       coreutilsBasename = builtins.baseNameOf "${pkgs.coreutils}";
     in
     {
-      name = "__dyndrv_final";
-      depsList = if needsAssemblerNode then order else [ sinkName ];
+      unitKey = "__dyndrv_final";
+      selfOutputNames = [ "out" ];
+      externalRefs = lib.unique (if needsAssemblerNode then map refOf order else [ (refOf sinkName) ]);
       drvJson = builtins.toJSON {
         inherit name;
         system = builtins.currentSystem;
@@ -162,7 +300,7 @@ let
           )
         ];
         env = {
-          out = "@dyndrv-placeholder:out@";
+          out = "@dyndrv-self-placeholder:out@";
         };
         inputs = {
           drvs = { };
@@ -176,16 +314,14 @@ let
       };
     };
 
-  allNodes = rendered ++ [ finalNode ];
+  allUnits = renderedUnits ++ [ finalNode ];
 
-  finalNodeName = "__dyndrv_final";
+  finalUnitKey = "__dyndrv_final";
 
-  # Bash function computing DownstreamPlaceholder::unknownCaOutput,
-  # ported from the verified formula in placeholder.nix (confirmed to
-  # match Nix's own computed placeholder exactly, see graph/compile.nix's
-  # header comment / the plan's resolved findings). `nix hash convert` is
-  # used here (unlike placeholder.nix's pure builtins.convertHash) because
-  # this runs inside the bash builder script, not Nix-expression eval.
+  # Bash port of DownstreamPlaceholder::unknownCaOutput, matching the
+  # pure-Nix formula in placeholder.nix -- `nix hash convert` is used
+  # here (unlike placeholder.nix's `builtins.convertHash`) since this
+  # runs inside the bash builder script, not Nix-expression eval.
   placeholderBashFn = ''
     dyndrv_placeholder() {
       local drvPath="$1" outputName="''${2:-out}"
@@ -205,39 +341,57 @@ let
     }
   '';
 
-  renderNodeScript = n: ''
-    drvJson=$(cat <<'DYNDRV_NODE_JSON'
-    ${n.drvJson}
-    DYNDRV_NODE_JSON
+  renderUnitScript = u: ''
+    drvJson=$(cat <<'DYNDRV_UNIT_JSON'
+    ${u.drvJson}
+    DYNDRV_UNIT_JSON
     )
 
-    # Wire this node's declared deps into inputs.drvs, using their ACTUAL
-    # registered basenames (known only now, at this point in the script).
-    # `+ {inputs: {drvs: {}, srcs: []}}` ensures both keys exist even if
-    # the node's own mkDrv output omitted `inputs` entirely (the common
-    # case: most producer-authored nodes never reference inputSrcs).
+    # `//= {} | //= []` ensures both keys exist even if a solo unit's own
+    # mkDrv output omitted `inputs` entirely -- merged units always set
+    # both explicitly already, so this is a no-op for them.
     drvJson=$(echo "$drvJson" | jq '.inputs.drvs //= {} | .inputs.srcs //= []')
+
+    # Substitute THIS unit's own self-placeholder sentinels (its own
+    # output(s) -- one for a solo unit, one per member for a merged one;
+    # also covers any fellow-member reference within a merged unit,
+    # since both resolve to the identical sentinel spelling).
+    for _outName in ${lib.concatMapStringsSep " " lib.escapeShellArg u.selfOutputNames}; do
+      _selfPlaceholder=$(nix eval --raw --expr "builtins.placeholder \"$_outName\"")
+      drvJson="''${drvJson//@dyndrv-self-placeholder:$_outName@/$_selfPlaceholder}"
+    done
+
+    # Wire every OTHER unit this one references into inputs.drvs (using
+    # that unit's actual registered basename, known only now), and
+    # substitute each cross-unit placeholder sentinel this unit's JSON
+    # references, using the already-registered upstream unit's real
+    # drvPath. Grouped by unit once (rather than re-filtering
+    # `u.externalRefs` per distinct unit), since a ref list can
+    # legitimately reference the same unit for several output names.
     inputDrvs='{}'
-    ${lib.concatMapStringsSep "\n" (dep: ''
-      inputDrvs=$(echo "$inputDrvs" | jq --arg k "''${drvs[${dep}]}" '. + {($k): {"outputs": ["out"], "dynamicOutputs": {}}}')
-    '') n.depsList}
+    ${
+      lib.concatMapStringsSep "\n" (
+        depUnitRefs:
+        let
+          depUnit = (builtins.head depUnitRefs).unit;
+          outs = lib.unique (map (r: r.outputName) depUnitRefs);
+        in
+        ''
+          inputDrvs=$(echo "$inputDrvs" | jq --arg k "''${drvs[${depUnit}]}" --argjson outs '${
+            builtins.toJSON outs
+          }' '. + {($k): {"outputs": $outs, "dynamicOutputs": {}}}')
+        ''
+      ) (builtins.attrValues (lib.groupBy (r: r.unit) u.externalRefs))
+    }
     drvJson=$(echo "$drvJson" | jq --argjson inputDrvs "$inputDrvs" '.inputs.drvs = (.inputs.drvs + $inputDrvs)')
 
-    # Substitute this node's own self-placeholder sentinel (existing
-    # convention from viaDerivationAdd.nix).
-    selfPlaceholder=$(nix eval --raw --expr 'builtins.placeholder "out"')
-    drvJson="''${drvJson//@dyndrv-placeholder:out@/$selfPlaceholder}"
+    ${lib.concatMapStringsSep "\n" (ref: ''
+      depPlaceholder=$(dyndrv_placeholder "''${drvPathByName[${ref.unit}]}" ${lib.escapeShellArg ref.outputName})
+      drvJson="''${drvJson//@dyndrv-node-placeholder:${ref.unit}:${ref.outputName}@/$depPlaceholder}"
+    '') u.externalRefs}
 
-    # Substitute every OTHER node's cross-node placeholder sentinel that
-    # this node's JSON references, using the already-registered upstream
-    # node's real drvPath.
-    ${lib.concatMapStringsSep "\n" (dep: ''
-      depPlaceholder=$(dyndrv_placeholder "''${drvPathByName[${dep}]}" out)
-      drvJson="''${drvJson//@dyndrv-node-placeholder:${dep}@/$depPlaceholder}"
-    '') n.depsList}
-
-    drvPathByName[${n.name}]=$(echo "$drvJson" | nix derivation add)
-    drvs[${n.name}]=$(basename "''${drvPathByName[${n.name}]}")
+    drvPathByName[${u.unitKey}]=$(echo "$drvJson" | nix derivation add)
+    drvs[${u.unitKey}]=$(basename "''${drvPathByName[${u.unitKey}]}")
   '';
 in
 {
@@ -261,9 +415,9 @@ in
         declare -A drvs=()
         declare -A drvPathByName=()
 
-        ${lib.concatMapStringsSep "\n\n" renderNodeScript allNodes}
+        ${lib.concatMapStringsSep "\n\n" renderUnitScript allUnits}
 
-        nix store submit-output "''${drvPathByName[${finalNodeName}]}" out
+        nix store submit-output "''${drvPathByName[${finalUnitKey}]}" out
         runHook postBuild
       '';
 

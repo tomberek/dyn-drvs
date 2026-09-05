@@ -29,10 +29,13 @@ let
       assemble = callLib ./lib/graph/assemble.nix;
       selectSink = callLib ./lib/graph/selectSink.nix;
       compile = callLib ./lib/graph/compile.nix;
+      groupByDirectory = callLib ./lib/graph/groupByDirectory.nix;
     };
 
     shim = {
       wrapCommand = callLib ./lib/shim/wrapCommand.nix;
+      wrapArchiver = callLib ./lib/shim/wrapArchiver.nix;
+      batchStub = callLib ./lib/shim/batchStub.nix;
     };
 
     accelerate = {
@@ -42,4 +45,5 @@ let
 in
 removeAttrs full [ "mkArgs" ] // {
   graph = removeAttrs full.graph [ "topoSort" ];
+  shim = removeAttrs full.shim [ "batchStub" ];
 }

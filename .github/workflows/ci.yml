@@ -26,7 +26,7 @@ jobs:
       - name: Run nix/tests/run-tests.sh
         run: nix/tests/run-tests.sh
 
-      - name: Run examples 02/04/05 (no builder-rpc-v0 needed)
+      - name: Run examples 02/04/05/06 (no builder-rpc-v0 needed)
         run: |
           nix build --extra-experimental-features "nix-command" \
             --no-link -f try-it-out/examples/02-fallback-ifd.nix
@@ -43,6 +43,10 @@ jobs:
             --extra-system-features recursive-nix \
             --store "local?root=/tmp/dyndrv-ci-store" \
             --no-link -f try-it-out/examples/05-accelerate-stdenv.nix
+          nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
+            --extra-system-features recursive-nix \
+            --store "local?root=/tmp/dyndrv-ci-store" \
+            --no-link -f try-it-out/examples/06-accelerate-stdenv-module.nix
 
       - name: small-lib-patch-rebuild.sh regression check
         run: ./try-it-out/benchmarks/small-lib-patch-rebuild.sh 10 300
@@ -63,7 +67,7 @@ jobs:
       - name: Verify run-nix.sh can fetch+build a working Nix
         run: ./try-it-out/run-nix.sh --version
 
-      - name: Run examples 01/03-graph-of-two/03-graph-of-three
+      - name: Run examples 01/03-graph-of-two/03-graph-of-three/03-graph-with-groups/03-graph-groupby-directory
         run: |
           ./try-it-out/run-nix.sh build --impure --no-link \
             -f try-it-out/examples/01-hello-dynamic-drv.nix
@@ -71,3 +75,7 @@ jobs:
             -f try-it-out/examples/03-graph-of-two.nix
           ./try-it-out/run-nix.sh build --impure --no-link \
             -f try-it-out/examples/03-graph-of-three.nix
+          ./try-it-out/run-nix.sh build --impure --no-link \
+            -f try-it-out/examples/03-graph-with-groups.nix
+          ./try-it-out/run-nix.sh build --impure --no-link \
+            -f try-it-out/examples/03-graph-groupby-directory.nix

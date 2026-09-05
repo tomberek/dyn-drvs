@@ -30,4 +30,5 @@ in
 {
   mkOutputOf = assertPass "mkOutputOf" (import ./mkOutputOf.nix { inherit pkgs lib dyndrv; });
   nonTrivial = assertPass "nonTrivial" (import ./nonTrivial.nix { inherit pkgs lib dyndrv; });
+  defaultBackend = assertPass "defaultBackend" (import ./defaultBackend.nix { inherit pkgs lib dyndrv; });
 }
