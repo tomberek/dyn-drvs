@@ -42,8 +42,26 @@ pub fn run_rpc_tail(
         // byte-copying instead of symlinking in native mode, see
         // ARCHITECTURE.md's "Why bytes not symlinks"). Copy bytes and
         // stamp the mtime to now instead.
+        //
+        // `fs::copy` sets the DESTINATION's permissions to match the
+        // SOURCE's, regardless of whether the destination already
+        // existed -- confirmed by direct reproduction: copying from a
+        // read-only Nix store path left `output_path` at mode 444, so a
+        // LATER standalone `ranlib` invocation modifying THIS SAME
+        // output path in place (via its own `cp`-then-modify `setup_cmd`,
+        // see `tonode.rs::ranlib_to_node`) failed with "Permission
+        // denied" trying to write back over it. `chmod u+w` explicitly
+        // afterward, matching this codebase's own established
+        // `cp && chmod u+w` idiom elsewhere (`cc`'s own `setup_cmd`,
+        // `ranlib_to_node`'s new one).
         let real_abs = format!("/nix/store/{}", real_path.to_base_path());
         std::fs::copy(&real_abs, output_path)?;
+        {
+            let mut perms = std::fs::metadata(output_path)?.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(output_path, perms)?;
+        }
         let now = std::time::SystemTime::now();
         let file = std::fs::File::open(output_path)?;
         file.set_modified(now)?;

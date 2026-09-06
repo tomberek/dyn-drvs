@@ -756,6 +756,7 @@ let
     compiledEnv = lib.optionalAttrs useCompiledShim {
       DYNDRV_REAL_COMMAND = realRanlib;
       DYNDRV_BINTOOLS_BASENAME = builtins.baseNameOf "${stdenv.cc.bintools.bintools}";
+      DYNDRV_COREUTILS_BASENAME = builtins.baseNameOf "${pkgs.coreutils}";
     };
     inherit nixPackage;
   };

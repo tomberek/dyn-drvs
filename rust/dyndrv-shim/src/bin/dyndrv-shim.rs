@@ -3,7 +3,6 @@ use dyndrv_shim::cc::{cc_to_node, discover_tree};
 use dyndrv_shim::mode;
 use dyndrv_shim::tonode::{ar_to_node, ranlib_to_node};
 use dyndrv_shim::wrapper::{run_discover_tree, run_plain};
-use nix_builder_rpc_client::BuilderRpcClient;
 use std::collections::HashMap;
 
 /// Entrypoint for the `cc`/`ar`/`ranlib` shims, dispatched via
@@ -19,7 +18,7 @@ use std::collections::HashMap;
 ///   DYNDRV_TOOL           which decision logic to dispatch to ("cc"/"ar"/"ranlib")
 ///   DYNDRV_REAL_COMMAND   absolute path to the real cc/ar/ranlib binary
 ///   DYNDRV_BINTOOLS_BASENAME  store basename of the bintools package (ar/ranlib only)
-///   DYNDRV_COREUTILS_BASENAME  store basename of coreutils (cc only)
+///   DYNDRV_COREUTILS_BASENAME  store basename of coreutils (cc/ranlib)
 ///   DYNDRV_STDENV_CC_BASENAME  store basename of stdenv.cc (cc only)
 ///   DYNDRV_BATCH_GROUPS   JSON `{relSourcePath: groupKey}` (cc only, optional)
 ///   DYNDRV_MODE           optional override: "sandbox" | "rpc" | "thunk"
@@ -29,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     let real_command = std::env::var("DYNDRV_REAL_COMMAND").context("DYNDRV_REAL_COMMAND")?;
     let argv: Vec<String> = std::env::args().skip(1).collect();
 
-    let client = BuilderRpcClient::connect_from_env().context("connect_from_env")?;
+    let client = mode::connect().context("connect")?;
     let mode = mode::detect();
 
     match tool.as_str() {
@@ -43,8 +42,10 @@ fn main() -> anyhow::Result<()> {
         "ranlib" => {
             let bintools_basename =
                 std::env::var("DYNDRV_BINTOOLS_BASENAME").context("DYNDRV_BINTOOLS_BASENAME")?;
+            let coreutils_basename = std::env::var("DYNDRV_COREUTILS_BASENAME")
+                .context("DYNDRV_COREUTILS_BASENAME")?;
             run_plain(&client, &real_command, &argv, mode, |rewritten| {
-                ranlib_to_node(rewritten, &real_command, &bintools_basename)
+                ranlib_to_node(rewritten, &real_command, &bintools_basename, &coreutils_basename)
             })
         }
         "cc" => {

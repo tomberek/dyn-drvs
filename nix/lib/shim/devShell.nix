@@ -43,9 +43,11 @@ let
   realAr = "${stdenv.cc.bintools.bintools}/bin/ar";
   realRanlib = "${stdenv.cc.bintools.bintools}/bin/ranlib";
   bintoolsBasename = builtins.baseNameOf "${stdenv.cc.bintools.bintools}";
+  coreutilsBasename = builtins.baseNameOf "${pkgs.coreutils}";
+  stdenvCcBasename = builtins.baseNameOf "${stdenv.cc}";
 
   mkCompiledShim =
-    command: realCommand:
+    command: realCommand: extraEnv:
     self.shim.wrapCommand {
       inherit command realCommand;
       # `toNode`/`toNodeBash` are never invoked in `toNodeCompiled` mode,
@@ -54,15 +56,29 @@ let
       toNodeCompiled = dyndrvShim;
       compiledEnv = {
         DYNDRV_REAL_COMMAND = realCommand;
-        DYNDRV_BINTOOLS_BASENAME = bintoolsBasename;
-      };
+      } // extraEnv;
     };
 
-  arShim = mkCompiledShim "ar" realAr;
-  ranlibShim = mkCompiledShim "ranlib" realRanlib;
+  ccShim = mkCompiledShim "cc" realCc {
+    DYNDRV_COREUTILS_BASENAME = coreutilsBasename;
+    DYNDRV_STDENV_CC_BASENAME = stdenvCcBasename;
+  };
+  arShim = mkCompiledShim "ar" realAr { DYNDRV_BINTOOLS_BASENAME = bintoolsBasename; };
+  ranlibShim = mkCompiledShim "ranlib" realRanlib {
+    DYNDRV_BINTOOLS_BASENAME = bintoolsBasename;
+    DYNDRV_COREUTILS_BASENAME = coreutilsBasename;
+  };
 
+  # cc-wrapper's own setup hook exports `CC=gcc` (the real compiler's
+  # binary NAME, not "cc") into the shell environment -- so shadowing
+  # `cc` alone on `$PATH` doesn't intercept `$CC`/`$CXX`-driven builds
+  # (same gotcha `mkAcceleratedStdenv.nix`'s own `wrapperDir` comment
+  # documents). Installed under both `cc` and `gcc`, matching that file's
+  # convention exactly; `CC`/`CXX` are exported explicitly below.
   wrapperDir = pkgs.runCommand "dyndrv-shim-devshell-wrapper" { } ''
     mkdir -p $out/bin
+    install -Dm755 ${pkgs.writeText "cc" ccShim.wrapperScript} $out/bin/cc
+    ln -s cc $out/bin/gcc
     install -Dm755 ${pkgs.writeText "ar" arShim.wrapperScript} $out/bin/ar
     install -Dm755 ${pkgs.writeText "ranlib" ranlibShim.wrapperScript} $out/bin/ranlib
   '';
@@ -70,11 +86,15 @@ in
 {
   shellHook = ''
     export PATH="${wrapperDir}/bin:$PATH"
+    export CC="${wrapperDir}/bin/cc"
+    export CXX="${wrapperDir}/bin/cc"
+    export AR="${wrapperDir}/bin/ar"
+    export RANLIB="${wrapperDir}/bin/ranlib"
     export DYNDRV_MODE=rpc
     ${lib.optionalString autoforce "export DYNDRV_AUTOFORCE=1"}
   '';
 
   # Exposed for callers that want to inspect/reuse the wrapper directly
   # (e.g. a test harness) rather than only via `shellHook`'s PATH splice.
-  inherit wrapperDir arShim ranlibShim;
+  inherit wrapperDir ccShim arShim ranlibShim;
 }

@@ -70,11 +70,60 @@ pub fn detect() -> DyndrvMode {
         }
         _ => {}
     }
-    let in_sandbox =
-        std::env::var_os("NIX_REMOTE").is_some() && std::env::var_os("NIX_BUILD_TOP").is_some();
-    if in_sandbox {
+    if in_sandbox() {
         DyndrvMode::Sandbox
     } else {
         DyndrvMode::Rpc { autoforce }
     }
+}
+
+/// `NIX_REMOTE` set AND `NIX_BUILD_TOP` set -- see `detect()`'s own doc
+/// comment for the full rationale. Exposed separately from `detect()`
+/// so `connect()` below can use the SAME signal `nix-builder-rpc-
+/// client::connect_from_env`'s own looser `in_drv` heuristic
+/// (`NIX_BUILD_TOP` alone) gets wrong: confirmed by direct reproduction
+/// that `nix develop`'s own shell-setup derivation leaves `NIX_BUILD_TOP`
+/// set in the INTERACTIVE shell it hands back (a real, common nixpkgs
+/// `mkShell` convention many setup hooks rely on for scratch space) even
+/// though `NIX_REMOTE` is empty there -- `connect_from_env()`'s own
+/// `in_drv` check alone would then wrongly select the sandboxed-only
+/// `AddToStoreScanning` opcode outside any sandbox at all, failing with
+/// "the daemon does not support the 'add-to-store-scanning' protocol
+/// feature" the moment `Rpc` mode's `add_to_store_nar` ran.
+pub fn in_sandbox() -> bool {
+    std::env::var_os("NIX_REMOTE").is_some() && std::env::var_os("NIX_BUILD_TOP").is_some()
+}
+
+/// Connects using the SAME `in_sandbox()` signal `detect()` uses for
+/// `in_drv`, instead of `BuilderRpcClient::connect_from_env()`'s own
+/// looser `NIX_BUILD_TOP`-alone heuristic -- see `in_sandbox()`'s own
+/// doc comment for why that heuristic is wrong outside a real sandbox.
+/// Otherwise mirrors `connect_from_env`'s own socket-path resolution
+/// exactly (`$NIX_REMOTE`, `unix://`-prefixed or a bare absolute path,
+/// else the standard daemon socket).
+pub fn connect() -> anyhow::Result<nix_builder_rpc_client::BuilderRpcClient> {
+    use nix_builder_rpc_client::BuilderRpcClient;
+    use std::path::PathBuf;
+
+    const DEFAULT_DAEMON_SOCKET: &str = "/nix/var/nix/daemon-socket/socket";
+
+    let path = match std::env::var("NIX_REMOTE") {
+        Ok(remote) if matches!(remote.as_str(), "daemon" | "auto" | "") => {
+            PathBuf::from(DEFAULT_DAEMON_SOCKET)
+        }
+        Ok(remote) => {
+            if let Some(stripped) = remote.strip_prefix("unix://") {
+                PathBuf::from(stripped)
+            } else if remote.starts_with('/') {
+                PathBuf::from(remote)
+            } else {
+                anyhow::bail!("dyndrv-shim: unsupported NIX_REMOTE '{remote}'");
+            }
+        }
+        Err(_) => PathBuf::from(DEFAULT_DAEMON_SOCKET),
+    };
+    if !path.exists() {
+        anyhow::bail!("dyndrv-shim: no daemon socket at {}", path.display());
+    }
+    BuilderRpcClient::connect_unix(&path, in_sandbox()).map_err(|e| anyhow::anyhow!("{e}"))
 }

@@ -73,7 +73,28 @@ where
             output_path,
         } => {
             let output_path = match (output_arg, output_path) {
-                (Some(idx), _) => rewritten
+                // Resolved from the ORIGINAL (stripped, pre-rewrite)
+                // argv, not `rewritten` -- confirmed necessary by direct
+                // reproduction against a standalone `ranlib` invocation
+                // (`Rpc` mode, no preceding `ar` in the same unit):
+                // `ranlib`'s own output path IS an already-real input
+                // file (it indexes an archive in place), so `rewrite_
+                // argv_element` had ALREADY replaced that exact argv
+                // slot with the archive's store path by the time
+                // `decide` returned `output_arg`, making the resolved
+                // "output path" a `/nix/store/...` string instead of
+                // the caller's own relative `liba.a`. This gap is
+                // identical in the bash oracle (`wrapCommand.nix`'s own
+                // `resolveNodeFields` also indexes `$argvJson`, the
+                // rewritten form) but never triggers there: `Sandbox`
+                // mode's own `ar`+`ranlib` chaining means the archive is
+                // still a pending STUB, never a real file, at rewrite
+                // time, so this exact argv slot is never actually
+                // rewritten in that mode. Using `stripped` here changes
+                // nothing for that already-working case (a stub path
+                // rewrites to itself either way) while fixing the
+                // previously-unreachable standalone case.
+                (Some(idx), _) => stripped
                     .get(idx)
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("outputArg {idx} out of range"))?,

@@ -62,6 +62,35 @@
             '';
           };
 
+        # `nix develop .#dyndrv-shim`: a real `cc`/`ar`/`ranlib` toolchain
+        # backed by the compiled `rust/dyndrv-shim` binary (see
+        # `nix/lib/shim/devShell.nix`'s own header comment) -- registers
+        # (and, with `DYNDRV_AUTOFORCE=1`, realizes) real derivations for
+        # every compile/archive step run in this shell, over an ordinary
+        # UNRESTRICTED daemon connection (`Rpc` mode, auto-detected: no
+        # `builder-rpc-v0` sandbox env vars present outside a real
+        # sandboxed build). Verified end-to-end (compile, archive,
+        # ranlib-index, link, run) against a real two-file C program.
+        dyndrv-shim =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            lib = nixpkgs.lib;
+            dyndrvLib = self.lib.${system};
+            dyndrvShim = import ./rust/dyndrv-shim.nix { inherit pkgs; };
+            shim = dyndrvLib.shim.devShell {
+              stdenv = pkgs.stdenv;
+              inherit dyndrvShim;
+              autoforce = true;
+            };
+          in
+          pkgs.mkShellNoCC {
+            name = "dyndrv-shim-devshell";
+            packages = [
+              pkgs.gnumake
+              pkgs.coreutils
+            ];
+            shellHook = shim.shellHook;
+          };
       });
     };
 }

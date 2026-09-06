@@ -183,11 +183,92 @@ throughout, since none of them exercise `discoverTree`'s absolute-path
 filtering, glued-flag store-path scanning, or `-Wl,`-referenced
 generated files at all.
 
+## Making `nix develop` actually work end to end
+
+`shim.devShell`'s own header comment always claimed `cc`/`ar`/`ranlib`
+wrappers, but `ccShim` was never actually built there — only `ar`/
+`ranlib`, with `realCc` computed and unused. A real `nix develop`
+session therefore got shimmed `ar`/`ranlib` but a completely
+UNshimmed, real `cc` — no acceleration at all for compiles, the bulk
+of any real build. Fixed by adding `ccShim`/`CC`/`CXX` exports,
+mirroring `mkAcceleratedStdenv.nix`'s own `wrapperDir` convention
+exactly (installed under both `cc` and `gcc`). Also added a real
+`devShells.dyndrv-shim` output in `flake.nix` (previously `shim.
+devShell` had no flake-level consumer at all — `nix develop` couldn't
+reach it).
+
+Getting a real `nix develop` session to compile+archive+link+run
+correctly surfaced FOUR more real bugs, none reachable from any
+existing fixture (`Sandbox` mode's `ar`+`ranlib` chaining and
+`Rpc`-mode-without-autoforce never exercise the code paths these live
+in):
+
+- **Standalone `ranlib` never seeded `$out` with the archive's real
+  content.** `ranlib` modifies its one archive argument IN PLACE, but
+  outside `Sandbox` mode's `ar`+`ranlib` `chainedFrom` chaining (which
+  folds both steps into one script where `ar`'s own output IS the
+  seed), a lone `ranlib` invocation registered `ranlib $out;` with
+  nothing ever populating `$out` — confirmed by direct reproduction
+  against a real `nix develop` session (`ranlib: No such file`). Fixed
+  by giving `ranlib_to_node` its own `setup_cmd` (`cp <real-archive-
+  path> $out && chmod u+w $out &&`), mirroring `cc`'s own `setup_cmd`
+  convention. Needed threading `DYNDRV_COREUTILS_BASENAME` through to
+  `ranlib` (previously `cc`-only) and adding the archive's own real
+  store path (excluded from the ordinary `extra_store_paths` scan,
+  since that argv slot is about to be overwritten with `"$out"`) as an
+  explicit `srcs` entry, or the sandboxed derivation never mounted it
+  at all.
+- **`run_plain` resolved `outputArg` from the REWRITTEN argv, not the
+  original.** For `ranlib`, the output path IS an already-real INPUT
+  file, so `rewrite_argv_element`'s generic "any existing regular file
+  gets rewritten to its own store path" pass had already replaced that
+  exact argv slot by the time `decide()` returned `output_arg` —
+  resolving a `/nix/store/...` string as the "output path" instead of
+  the caller's own relative `liba.a`. Identical gap in the bash
+  oracle's own `resolveNodeFields` (also indexes the rewritten
+  `$argvJson`), never triggered there since `Sandbox` mode's chaining
+  means the archive is always still a pending STUB, never a real file,
+  at rewrite time. Fixed by resolving `output_arg` from the stripped
+  (pre-rewrite) argv instead — a no-op for the already-working stub
+  case, since a stub path rewrites to itself either way.
+- **`run_rpc_tail`'s autoforce byte-copy left the output read-only.**
+  `fs::copy` sets the destination's permissions to match the SOURCE's
+  regardless of whether the destination already existed — copying from
+  a read-only Nix store path left the caller-visible output at mode
+  444. A LATER standalone `ranlib` invocation modifying that same path
+  in place (via the fix above) then failed with "Permission denied"
+  trying to write back over it. Fixed with an explicit `chmod u+w`
+  after the copy.
+- **`connect_from_env`'s own `in_drv` heuristic misfires inside `nix
+  develop`.** `nix-builder-rpc-client::connect_from_env` treats
+  `NIX_BUILD_TOP` alone as "inside a derivation build," but `nix
+  develop`'s own shell-setup derivation leaves `NIX_BUILD_TOP` set in
+  the INTERACTIVE shell it hands back (an ordinary, common nixpkgs
+  `mkShell` convention many setup hooks rely on for scratch space) even
+  though `NIX_REMOTE` is empty there. This wrongly selected the
+  sandboxed-only `AddToStoreScanning` opcode outside any sandbox,
+  failing with "the daemon does not support the 'add-to-store-
+  scanning' protocol feature" the moment `cc`'s own `discoverTree`-
+  equivalent path called `add_to_store_nar`. Fixed by adding
+  `mode::connect()` — same socket-resolution logic as `connect_from_env`,
+  but using dyndrv's own already-correct `in_sandbox()` check (`NIX_REMOTE`
+  AND `NIX_BUILD_TOP` both set, matching `mode::detect()`'s own
+  criterion) instead of the vendored crate's looser one. Both binaries
+  (`dyndrv-shim`, `dyndrv-collect`) now use this helper.
+
+Verified end-to-end after all four fixes: a real `nix develop
+.#dyndrv-shim` session (via `flake.nix`'s new devShell) compiling two
+files, archiving one into a static library, `ranlib`-indexing it,
+linking against both the object and the archive, and running the
+result — all through the compiled shim, with `DYNDRV_AUTOFORCE=1` so
+every step realizes immediately.
+
 ## What's still follow-on work
 
 - `Thunk { format: Drv }`'s multi-node graph case (real `inputDrvs`
   chaining across several dyndrv-produced `.drv` files) is unbuilt —
-  only verified against a single-node fixture.
+  only verified against a single-node fixture. See `docs/drv-thunk-
+  multinode-design.md` for the design.
 - Batching across the transitive thunk graph for `Thunk { format: Nix
   }`'s own autoforce path (nixgg's own `realise.Realise`) is unbuilt —
   only the single-thunk case works today.

@@ -1,12 +1,12 @@
 use anyhow::Context;
 use dyndrv_shim::collect::{self, output_name_of};
+use dyndrv_shim::mode;
 use dyndrv_shim::render::{render_unit, shell_quote};
 use harmonia_store_content_address::ContentAddressMethodAlgorithm;
 use harmonia_store_derivation::derivation::{Derivation, DerivationOutput};
 use harmonia_store_derivation::derived_path::{OutputName, SingleDerivedPath};
 use harmonia_store_derivation::placeholder::Placeholder;
 use harmonia_store_path::{StoreDir, StorePath};
-use nix_builder_rpc_client::BuilderRpcClient;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
         .cloned()
         .context("usage: dyndrv-collect <buildRoot> <name>")?;
 
-    let client = BuilderRpcClient::connect_from_env().context("connect_from_env")?;
+    let client = mode::connect().context("connect")?;
     let store_dir = StoreDir::default();
 
     // Phase 1+2: discover every stub + its deps.
