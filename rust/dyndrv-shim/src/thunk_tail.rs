@@ -46,7 +46,7 @@ fn run_drv_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow
     let cwd = std::env::current_dir()?;
     let workspace = thunk::resolve_workspace(&cwd);
 
-    let drv_path = drv_thunk::write_drv_thunk(&workspace, record)?;
+    let (drv_path, _store_path) = drv_thunk::write_drv_thunk(&workspace, record)?;
 
     let output_abs = if Path::new(output_path).is_absolute() {
         Path::new(output_path).to_path_buf()

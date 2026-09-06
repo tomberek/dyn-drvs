@@ -1,10 +1,43 @@
 use crate::record::Record;
-use harmonia_store_content_address::ContentAddressMethodAlgorithm;
+use harmonia_store_content_address::{ContentAddress, ContentAddressMethodAlgorithm};
 use harmonia_store_derivation::derivation::{Derivation, DerivationOutput};
 use harmonia_store_derivation::derived_path::{OutputName, SingleDerivedPath};
 use harmonia_store_derivation::placeholder::Placeholder;
 use harmonia_store_path::{StoreDir, StorePath};
 use std::path::{Path, PathBuf};
+
+/// Computes a `.drv`'s own content-addressed `StorePath` LOCALLY, with
+/// no daemon round-trip -- the missing piece `Thunk{Drv}` mode's write
+/// path needs to let a DEPENDENT invocation (a later `ar`/`cc` step)
+/// reference an earlier thunk's real store identity via `SingleDerivedPath::
+/// Built`, since nothing here ever calls `add_drv_to_store` (that's the
+/// whole point of this mode -- no daemon call for the write itself).
+///
+/// Mirrors what `nix-builder-rpc-client::add_drv_to_store`'s SERVER
+/// side computes internally: a `.drv`'s own CA method is `text:sha256`
+/// over its ATerm bytes (confirmed by reading `add_drv_to_store`'s own
+/// call, which passes `ContentAddressMethodAlgorithm::Text`), and the
+/// `.drv` FILE's own name (for CA-fingerprint purposes, not the
+/// deriving package's name) is `"{drv.name}.drv"` -- also confirmed
+/// directly from that same call site (`let name = format!("{}.drv",
+/// drv.name);`). `harmonia_store_content_address::make_store_path_from_ca`
+/// does the actual "fixed:out:r:<hash>:"-style fingerprint + SHA-256
+/// Nix uses internally to turn a `ContentAddress` into a real
+/// `StorePath` -- this function only supplies the two inputs specific
+/// to a `.drv`'s own CA scheme.
+pub fn compute_drv_store_path(
+    store_dir: &StoreDir,
+    drv_name: &str,
+    aterm_bytes: &[u8],
+) -> anyhow::Result<StorePath> {
+    let name: harmonia_store_path::StorePathName = format!("{drv_name}.drv")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let ca = ContentAddress::Text(harmonia_utils_hash::Sha256::digest(aterm_bytes));
+    Ok(harmonia_store_content_address::make_store_path_from_ca(
+        store_dir, name, ca,
+    ))
+}
 
 /// EXPERIMENTAL (task #65): writes a real, ATerm-serialized `.drv` file
 /// directly to disk -- via the SAME printer (`harmonia_store_aterm::
@@ -23,7 +56,7 @@ use std::path::{Path, PathBuf};
 /// explicitly NOT implemented here; see this module's own doc for why
 /// (the plan's own "genuine experiment, not a committed deliverable"
 /// framing).
-pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<PathBuf> {
+pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<(PathBuf, StorePath)> {
     let store_dir = StoreDir::default();
 
     let mut script = String::new();
@@ -70,6 +103,7 @@ pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<Path
     }
 
     let aterm_bytes = harmonia_store_aterm::print_derivation_aterm(&store_dir, &drv);
+    let store_path = compute_drv_store_path(&store_dir, "dyndrv-thunk", &aterm_bytes)?;
 
     // Content-addressed filename, matching `thunk.rs`'s own convention
     // (sha256 of the CONTENT, here the ATerm bytes themselves rather
@@ -86,7 +120,7 @@ pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<Path
         std::fs::write(&tmp, &aterm_bytes)?;
         std::fs::rename(&tmp, &dst)?;
     }
-    Ok(dst)
+    Ok((dst, store_path))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
