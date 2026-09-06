@@ -46,7 +46,26 @@ fn run_drv_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow
     let cwd = std::env::current_dir()?;
     let workspace = thunk::resolve_workspace(&cwd);
 
-    let (drv_path, _store_path) = drv_thunk::write_drv_thunk(&workspace, record)?;
+    // Scan this record's own `args` for positional elements that are
+    // ACTUALLY symlinks into `.dyndrv/thunks-drv/` -- real cross-drv
+    // dependencies left by an earlier, already-completed shim
+    // invocation in the SAME `Thunk{Drv}` graph (e.g. `ar`'s own `.o`
+    // args, each some earlier `cc` invocation's deferred output). Each
+    // match becomes a real `SingleDerivedPath::Built` `inputDrvs` edge
+    // in the derivation `write_drv_thunk` builds below, instead of a
+    // plain (and, once this `.drv` is realized elsewhere, likely
+    // nonexistent) relative-path string.
+    let mut deps = std::collections::HashMap::new();
+    for a in &record.args {
+        if a == "$out" || a.starts_with('-') {
+            continue;
+        }
+        if let Some(dep) = drv_thunk::resolve_drv_thunk_dependency(Path::new(a)) {
+            deps.insert(a.clone(), dep);
+        }
+    }
+
+    let (drv_path, _store_path) = drv_thunk::write_drv_thunk(&workspace, record, &deps)?;
 
     let output_abs = if Path::new(output_path).is_absolute() {
         Path::new(output_path).to_path_buf()

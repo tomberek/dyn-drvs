@@ -4,6 +4,7 @@ use harmonia_store_derivation::derivation::{Derivation, DerivationOutput};
 use harmonia_store_derivation::derived_path::{OutputName, SingleDerivedPath};
 use harmonia_store_derivation::placeholder::Placeholder;
 use harmonia_store_path::{StoreDir, StorePath};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Computes a `.drv`'s own content-addressed `StorePath` LOCALLY, with
@@ -39,24 +40,69 @@ pub fn compute_drv_store_path(
     ))
 }
 
+/// Detects whether `path` is a symlink into `.dyndrv/thunks-drv/` (a
+/// `Thunk{Drv}`-produced dependency, written by an EARLIER, already-
+/// completed shim invocation -- e.g. `ar`'s own `.o` positional args,
+/// each some earlier `cc` invocation's deferred output) and, if so,
+/// resolves that target `.drv` file's own `StorePath` -- by re-reading
+/// and re-hashing its ATerm bytes via `compute_drv_store_path`, the
+/// simplest option and cheap enough given `.drv` files are small (no
+/// extra sidecar cache needed unless this proves too slow in practice).
+/// Returns `None` for a real file, a `Thunk{Nix}` thunk symlink
+/// (`.dyndrv/thunks/`, a different directory), or anything else that
+/// isn't this specific representation -- callers fall back to treating
+/// the argv element as plain text in that case.
+pub fn resolve_drv_thunk_dependency(path: &Path) -> Option<(StorePath, OutputName)> {
+    let target = std::fs::read_link(path).ok()?;
+    // Confirmed by direct reproduction: `.dyndrv/thunks-drv/` may be an
+    // ABSOLUTE or a RELATIVE symlink target depending on how it was
+    // written -- checking the target's own PARENT directory NAME
+    // (`thunks-drv`) rather than requiring a specific absolute prefix
+    // works either way.
+    if target.parent().and_then(|p| p.file_name()) != Some(std::ffi::OsStr::new("thunks-drv")) {
+        return None;
+    }
+    let aterm_bytes = std::fs::read(&target).ok()?;
+    let store_dir = StoreDir::default();
+    let store_path = compute_drv_store_path(&store_dir, "dyndrv-thunk", &aterm_bytes).ok()?;
+    let out_name: OutputName = "out".parse().ok()?;
+    Some((store_path, out_name))
+}
+
 /// EXPERIMENTAL (task #65): writes a real, ATerm-serialized `.drv` file
 /// directly to disk -- via the SAME printer (`harmonia_store_aterm::
 /// print_derivation_aterm`) `Rpc` mode's `add_drv_to_store` uses
 /// internally, just writing the bytes to a local path instead of over
 /// a socket. No daemon call at all for the write itself.
 ///
-/// UNVERIFIED beyond the single-node case as of this writing: a real
-/// `.drv`'s own `inputDrvs` field is Nix's native on-disk dependency-
-/// edge format, so in principle chaining several `.drv`-format thunks
+/// `deps`: `{ <record.args element> -> (dependency's own StorePath,
+/// dependency's own output name) }`, built by the CALLER (`thunk_tail
+/// .rs::run_drv_format`'s own dependency scan, task #78) by detecting
+/// which of THIS record's `args` are symlinks into
+/// `.dyndrv/thunks-drv/` -- i.e. real cross-drv `inputDrvs` edges, not
+/// plain content. For each such element, this function wires a
+/// `SingleDerivedPath::Built { drv_path, output }` into `drv.inputs`
+/// (matching `dyndrv-collect.rs`'s own identical pattern for cross-unit
+/// deps) and substitutes the SCRIPT's own reference to that arg with
+/// the dependency's real placeholder token (`Placeholder::ca_output`,
+/// same substitution idea `render.rs`/`dyndrv-collect.rs` already use)
+/// instead of the literal relative path text -- the relative path
+/// wouldn't exist as a real file when this `.drv` is later realized in
+/// a completely different working directory.
+///
+/// A real `.drv`'s own `inputDrvs` field is Nix's native on-disk
+/// dependency-edge format, so chaining several `.drv`-format thunks
 /// together needs no separate thunk-graph helper file the way `Nix`-
 /// format thunks do (`thunk_tail.rs`'s own single-thunk-only
-/// limitation) -- but this function only builds a single derivation
-/// from a single `Record`, with no `inputDrvs` wiring to another
-/// dyndrv-produced `.drv` at all. Cross-thunk `.drv` chaining is
-/// explicitly NOT implemented here; see this module's own doc for why
-/// (the plan's own "genuine experiment, not a committed deliverable"
-/// framing).
-pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<(PathBuf, StorePath)> {
+/// limitation, before task #78/#79) -- `nix-store --realise`'s own
+/// transitive `inputDrvs` walk on the ROOT `.drv` should resolve the
+/// whole graph on its own (task #80 verifies whether this holds when a
+/// referenced `.drv` was never itself `--add`ed to the store).
+pub fn write_drv_thunk(
+    workspace: &Path,
+    record: &Record,
+    deps: &HashMap<String, (StorePath, OutputName)>,
+) -> anyhow::Result<(PathBuf, StorePath)> {
     let store_dir = StoreDir::default();
 
     let mut script = String::new();
@@ -68,6 +114,9 @@ pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<(Pat
         script.push(' ');
         if a == "$out" {
             script.push_str(a);
+        } else if let Some((dep_drv_path, dep_out_name)) = deps.get(a) {
+            let ph = Placeholder::ca_output(dep_drv_path, dep_out_name).render();
+            script.push_str(&crate::render::shell_quote(&ph.to_string_lossy()));
         } else {
             script.push_str(&crate::render::shell_quote(a));
         }
@@ -100,6 +149,13 @@ pub fn write_drv_thunk(workspace: &Path, record: &Record) -> anyhow::Result<(Pat
         if let Ok(sp) = StorePath::from_base_path(src_basename) {
             drv.inputs.insert(SingleDerivedPath::Opaque(sp));
         }
+    }
+    // Real cross-drv edges -- see this function's own `deps` doc above.
+    for (dep_drv_path, dep_out_name) in deps.values() {
+        drv.inputs.insert(SingleDerivedPath::Built {
+            drv_path: std::sync::Arc::new(SingleDerivedPath::Opaque(dep_drv_path.clone())),
+            output: dep_out_name.clone(),
+        });
     }
 
     let aterm_bytes = harmonia_store_aterm::print_derivation_aterm(&store_dir, &drv);

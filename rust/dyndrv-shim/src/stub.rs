@@ -55,13 +55,22 @@ pub fn read_pending_symlink(path: &Path) -> Option<harmonia_store_path::StorePat
     harmonia_store_path::StorePath::from_base_path(rest).ok()
 }
 
-/// True if `path` is EITHER pending-dependency representation --
-/// `Sandbox` mode's text stub or `Rpc` mode's real symlink-to-`.drv`.
-/// Callers that only need the boolean fact "is this a placeholder, not
-/// real content" (argv-rewrite guards that would otherwise wrongly
-/// stage placeholder bytes as real file content) should use this
-/// instead of `read_batch_stub(..).is_some()` alone, now that a pending
-/// dependency can be represented either way depending on mode.
+/// True if `path` is ANY pending-dependency representation --
+/// `Sandbox` mode's text stub, `Rpc` mode's real symlink-to-`.drv` (a
+/// STORE path), or `Thunk{Drv}` mode's real symlink-to-`.drv` (a
+/// WORKSPACE-relative `.dyndrv/thunks-drv/` path, not yet in the
+/// store). Callers that only need the boolean fact "is this a
+/// placeholder, not real content" (argv-rewrite guards that would
+/// otherwise wrongly stage placeholder bytes as real file content)
+/// should use this instead of `read_batch_stub(..).is_some()` alone,
+/// now that a pending dependency can be represented three different
+/// ways depending on mode -- confirmed necessary by direct
+/// reproduction: without the `Thunk{Drv}` check, `rewrite_argv_element`
+/// staged a `.drv`-thunk symlink's OWN ATerm bytes as if they were real
+/// object content, corrupting the dependent derivation's `srcs`/script
+/// with a bogus store path instead of a real `inputDrvs` edge.
 pub fn is_pending(path: &Path) -> bool {
-    read_batch_stub(path).is_some() || read_pending_symlink(path).is_some()
+    read_batch_stub(path).is_some()
+        || read_pending_symlink(path).is_some()
+        || crate::drv_thunk::resolve_drv_thunk_dependency(path).is_some()
 }
