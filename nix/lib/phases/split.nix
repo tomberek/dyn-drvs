@@ -68,33 +68,53 @@
 # own `$(out)`-style variable syntax) ends up with the WRONG, placeholder
 # path frozen into its Makefiles -- confirmed by direct reproduction
 # against real, unmodified freetype: `configureFlags` includes
-# `--prefix=/nonexistent` (stdenv's own automatic multi-output logic,
-# `multiple-outputs.sh`'s `_multioutConfig`, substitutes `${!outputBin}`
-# etc. at CONFIGURE time). Since phase 1 always forces `outputs =
-# ["out"]` (see above), every OTHER output variable (`dev`, `bin`, ...)
-# is simply unset there -- `multiple-outputs.sh`'s own `_overrideFirst
-# outputDev "dev" "out"` falls back to `"out"` for every one of them, so
-# EVERYTHING configure bakes in collapses to the single literal
-# `/nonexistent`, not a per-output-suffixed set of placeholder paths
-# (confirmed directly: no `/nonexistent-dev`-style path appears anywhere
-# in a real freetype configure run). `make install` in phase 2 (which
-# reads the ALREADY-GENERATED Makefile, unaffected by phase 2's own real,
+# `--prefix=${dyndrvPlaceholderOut}` (stdenv's own automatic multi-output
+# logic, `multiple-outputs.sh`'s `_multioutConfig`, substitutes
+# `${!outputBin}` etc. at CONFIGURE time). Since phase 1 always forces
+# `outputs = ["out"]` (see above), every OTHER output variable (`dev`,
+# `bin`, ...) is simply unset there -- `multiple-outputs.sh`'s own
+# `_overrideFirst outputDev "dev" "out"` falls back to `"out"` for every
+# one of them, so EVERYTHING configure bakes in collapses to the single
+# literal `${dyndrvPlaceholderOut}`, not a per-output-suffixed set of
+# placeholder paths (confirmed directly: no
+# `${dyndrvPlaceholderOut}-dev`-style path appears anywhere in a real
+# freetype configure run). `make install` in phase 2 (which reads the
+# ALREADY-GENERATED Makefile, unaffected by phase 2's own real,
 # multi-output `$out`/`$dev` env vars) therefore writes everywhere under
-# that one `/nonexistent/...` root instead of the real per-output paths,
-# and `fixupPhase` then fails outright since nothing was ever installed
-# under the real `$dev/include` etc.
+# that one `${dyndrvPlaceholderOut}/...` root instead of the real
+# per-output paths, and `fixupPhase` then fails outright since nothing
+# was ever installed under the real `$dev/include` etc.
+#
+# WHY UNDER `/build`, NOT `/nonexistent`: this placeholder must be a path
+# the SANDBOX ITSELF can actually create and write to -- confirmed by
+# direct reproduction that a real Nix sandbox's root filesystem is
+# `drwxr-x---`, owned by the build user/group with NO write permission
+# even for that same group, so an absolute path outside the sandbox's
+# own bind-mounted build directory (`/nonexistent`, matching
+# `mkDynamicDerivation.nix`'s own placeholder-output convention, which
+# only ever needs the path to be UNWRITABLE, never to be written to)
+# fails outright with "Permission denied" the moment `make install`
+# actually tries to `mkdir` it in phase 2. `/build` (Nix's own
+# `sandbox-build-dir` setting, confirmed present and writable in every
+# sandboxed derivation) is the one absolute path guaranteed writable
+# regardless of the sandbox's own root-permission scheme -- using a
+# literal path underneath it (not `$NIX_BUILD_TOP`, an env var only
+# available at the CALLING derivation's OWN build time, not after that
+# Makefile has already been generated and carried into phase 2's fresh
+# sandbox) works identically in both phase 1 (where it's set but never
+# written to) and phase 2 (where `make install` actually creates it).
 #
 # The fix: after `installPhase` runs (and BEFORE `fixupPhase`, which
-# needs the real paths to exist), `dyndrv_restore_nonexistent` merges
-# `/nonexistent`'s ENTIRE tree into the real `$out` -- not split across
-# outputs, since nothing in the generated build system ever distinguished
-# them -- via `cp -r`+`chmod -R u+w` (matching this codebase's own
-# established staging idiom elsewhere) rather than a plain `mv`, since
-# `installPhase` may ALSO have written some files directly to the real
-# `$out`/`$dev` already (e.g. via a `postInstall` hook that references
-# `$dev` directly, unaffected by this bug at all) that must not be
-# clobbered. Multi-output-aware packages (`fixupPhase`'s own
-# `_multioutDevs`/`_multioutDocs` hooks) then correctly redistribute
+# needs the real paths to exist), `dyndrvRestoreOutput` merges
+# `${dyndrvPlaceholderOut}`'s ENTIRE tree into the real `$out` -- not
+# split across outputs, since nothing in the generated build system ever
+# distinguished them -- via `cp -r`+`chmod -R u+w` (matching this
+# codebase's own established staging idiom elsewhere) rather than a
+# plain `mv`, since `installPhase` may ALSO have written some files
+# directly to the real `$out`/`$dev` already (e.g. via a `postInstall`
+# hook that references `$dev` directly, unaffected by this bug at all)
+# that must not be clobbered. Multi-output-aware packages (`fixupPhase`'s
+# own `_multioutDevs`/`_multioutDocs` hooks) then correctly redistribute
 # `$out`'s newly-merged content across the real outputs exactly as they
 # always would for an ordinary, non-accelerated build -- this restore
 # step's only job is getting everything OFF the placeholder root and
@@ -129,6 +149,14 @@
 
 let
   useCompiledCollect = dyndrvShim != null;
+
+  # A fixed, `/build`-relative placeholder path -- see this file's own
+  # "WHY UNDER `/build`, NOT `/nonexistent`" header comment above for why
+  # this specific absolute path (not `/nonexistent`, not `$NIX_BUILD_TOP`)
+  # is required. Not itself unique per build; that's fine, since it's
+  # only ever real content within ONE sandboxed derivation's own build
+  # directory at a time, never shared across builds.
+  dyndrvPlaceholderOut = "/build/dyndrv-placeholder-out";
 
   # The submitted (inner) node's own name must match phase 1's OUTER
   # derivation's name exactly -- but `nix store submit-output` submits
@@ -184,14 +212,14 @@ let
       __contentAddressed = true;
       outputHashMode = "text";
       outputHashAlgo = "sha256";
-      out = "/nonexistent";
+      out = dyndrvPlaceholderOut;
       # `preCollect`/`postCollect`, NOT `preInstall`/`postInstall` --
       # confirmed by direct reproduction against real freetype: `runHook`
       # fires by HOOK NAME, not by phase, so calling `runHook
       # preInstall`/`postInstall` here also fires the WRAPPED PACKAGE'S
       # OWN `preInstall`/`postInstall` (freetype's real `postInstall`
       # runs `wrapProgram "$dev/bin/freetype-config"`), which crashes
-      # here since `$out`/`$dev` are still `/nonexistent` in phase 1.
+      # here since `$out`/`$dev` are still the placeholder path in phase 1.
       # `installPhase`'s `preInstall`/`postInstall` still fire normally
       # in phase 2 below, against phase 1's real, resolved output.
       collectPhase = ''
@@ -213,9 +241,9 @@ let
   # A synthesized `dyndrvRestoreOutput` phase is inserted immediately
   # after EVERY `"installPhase"` entry in `replayPhases` (ordinarily just
   # the one) -- see this file's own "THE RESTORE STEP" header comment
-  # above for the full rationale. It merges `/nonexistent` (the EXACT
-  # literal path `sandboxedDrv.out` is hardcoded to above -- not a
-  # placeholder to look up, a known constant) into the real `$out`, via
+  # above for the full rationale. It merges `dyndrvPlaceholderOut` (the
+  # EXACT path `sandboxedDrv.out` is set to above -- not a placeholder to
+  # look up, a known constant) into the real `$out`, via
   # `cp -r` (not a plain `mv`) specifically so any file `installPhase`
   # already wrote directly to the real `$out`/`$dev` (unaffected by this
   # bug, e.g. via a `postInstall` hook referencing `$dev` directly) is
@@ -240,11 +268,11 @@ stdenv.mkDerivation (
     phases = [ "unpackPhase" ] ++ finalReplayPhases;
     dyndrvRestoreOutput = ''
       runHook preDyndrvRestoreOutput
-      if [ -d /nonexistent ]; then
+      if [ -d ${dyndrvPlaceholderOut} ]; then
         mkdir -p "$out"
-        cp -r /nonexistent/. "$out"/
+        cp -r ${dyndrvPlaceholderOut}/. "$out"/
         chmod -R u+w "$out"
-        rm -rf /nonexistent
+        rm -rf ${dyndrvPlaceholderOut}
         # Everything just landed under the single `$out` root, since
         # phase 1 (where these paths were baked in) only ever had ONE
         # output -- for a real multi-output package, nixpkgs' own

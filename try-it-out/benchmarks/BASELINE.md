@@ -213,46 +213,56 @@ src/base/ftglyph.c` etc. appear in the build log), and examples 05/06
 rebuild to byte-identical output, confirming no regression to the
 existing, unaffected call path.
 
-## Compiled-shim (`dyndrv-shim`) re-measurement: BLOCKED in this environment (2026-09-06)
+## Real bug found and fixed while attempting the compiled-shim re-measurement (2026-09-06): `phases.split`'s `/nonexistent` placeholder is unwritable in a real sandbox
 
-Task: re-run `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
-against the new `toNodeCompiled`/`dyndrvShim` path (see `docs/
-rust-status.md`'s own "cc's decision logic ... ported and verified"
-section — the compiled path was verified CORRECT against examples
-05/06/07, including a full real freetype compile+link) and update the
-numbers above.
+Attempting to re-run `real-package-patch-rebuild.sh`/
+`real-package-version-bump.sh` against the new `toNodeCompiled`/
+`dyndrvShim` path (see `docs/rust-status.md`'s own "cc's decision
+logic ... ported and verified" section — the compiled path was already
+verified CORRECT against examples 05/06/07, including a full real
+freetype compile+link) surfaced a genuine, previously-undetected bug in
+`phases.split` itself, on BOTH the existing bash-path and the new
+compiled-path accelerated variants identically:
 
-**Could not complete**: both the EXISTING bash-path accelerated variant
-and the new compiled-path variant hang/fail identically on this
-machine's current local, single-user store setup
-(`build-users-group = ""`, no dedicated build user) — `phases.split`'s
-phase 2 `installPhase` fails at the exact same point on both paths:
 ```
 mkdir: cannot create directory '/nonexistent': Permission denied
 make: *** [.../install.mk:39: install] Error 1
 ```
-Confirmed genuinely environmental, not a regression from the compiled
-path: re-ran the UNMODIFIED bash-path benchmark script standalone (no
-`dyndrvShim` involved at all) and it fails identically at the same
-`mkdir /nonexistent` line. `phases.split`'s own `out = "/nonexistent"`
-override (see that file's header comment) apparently depends on a
-sandbox/build-user configuration this machine's CURRENT local-store
-setup no longer provides — `/nonexistent` is a real, root-owned
-absolute path outside the sandbox's writable set; under a genuine
-multi-user Nix daemon build with a dedicated build user, the sandbox's
-own private mount namespace makes it writable, but that mapping isn't
-present here. This is unrelated to whatever configuration produced this
-file's own `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
-numbers above (2026-09-05) — those completed successfully on this same
-machine only one day earlier, so something about the ambient
-environment (not this codebase) shifted in between.
 
-Both examples 05 and 06 (which don't need `phases.split`'s
-sandboxed/replay tree-restore step at all — `installPhase` for those
-runs straightforward `cp`) build and run correctly end-to-end under the
-compiled path, confirming the shim itself is not the blocker. Re-attempt
-this benchmark once the environment's sandbox/build-user setup is
-restored to whatever state let it succeed on 2026-09-05.
+**Root cause, confirmed by direct reproduction**: a real Nix sandbox's
+root filesystem (`/`) is mounted `drwxr-x---`, owned by the build
+user/group with NO write permission even for that same group — only
+`/build` (Nix's own `sandbox-build-dir`, always bind-mounted writable)
+is actually writable. `phases.split` used the literal path
+`/nonexistent` as phase 1's placeholder `$out` (mirroring
+`mkDynamicDerivation.nix`'s own convention, which only ever needs that
+path to be UNWRITABLE, never written to) — but `phases.split`'s own
+"THE RESTORE STEP" mechanism (see that file's header comment) DOES
+write to it, in phase 2's `installPhase`, once a package's baked-in
+`--prefix=/nonexistent` configure flag causes real files to land there.
+Confirmed this is genuinely path-dependent, not a general sandbox
+regression: examples 05/06 (whose packages don't bake `$out` into
+`configureFlags` this way) built successfully throughout, on both code
+paths, even while 07 (real freetype, which does) failed on both.
+
+**Fixed** by switching the placeholder from `/nonexistent` to
+`/build/dyndrv-placeholder-out` (a fixed path under the one absolute
+directory a sandbox always makes writable) in `nix/lib/phases/split.nix`
+— a one-line, three-call-site change (`out`'s value, the
+`dyndrvRestoreOutput` phase's `if`/`cp`/`rm`). Re-verified: the FULL
+accelerated freetype build now completes end-to-end on BOTH the
+bash-path and compiled-path variants, producing a genuinely working
+`libfreetype.so` (loaded and version-checked via a small
+`FT_Init_FreeType`/`FT_Library_Version` test program, same method
+`07-accelerate-real-package.nix`'s own header documents) — not just "the
+build succeeded."
+
+This means `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
+are unblocked again (this file's numbers above from 2026-09-05 predate
+the fix but remain valid — they were measured before whatever caused
+`/nonexistent` to stop being writable on this machine). Re-measuring
+the compiled path's own wall-clock numbers against these two scripts is
+still open follow-on work, tracked separately from this fix.
 
 ### Historical: bugs found building the real-package benchmark under the earlier `recursive-nix` architecture
 
