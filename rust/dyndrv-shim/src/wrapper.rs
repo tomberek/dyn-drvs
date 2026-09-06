@@ -1,4 +1,6 @@
+use crate::mode::DyndrvMode;
 use crate::record::Record;
+use crate::rpc_tail::run_rpc_tail;
 use crate::stub;
 use crate::tonode::Decision;
 use nix_builder_rpc_client::BuilderRpcClient;
@@ -27,11 +29,14 @@ pub fn strip_pwd_prefix(s: &str, orig_pwd: &str) -> String {
 /// variant, minus the `nix-instantiate`/`jq` spawns it needed.
 ///
 /// `decide`: closure implementing this tool's own `toNode`/`toNodeBash`
-/// equivalent, given the REWRITTEN argv.
+/// equivalent, given the REWRITTEN argv. `mode`: decided once by
+/// `crate::mode::detect()` in the entrypoint, threaded in here rather
+/// than re-detected per call.
 pub fn run_plain<F>(
     client: &BuilderRpcClient,
     real_command: &str,
     orig_argv: &[String],
+    mode: DyndrvMode,
     decide: F,
 ) -> anyhow::Result<()>
 where
@@ -69,7 +74,16 @@ where
                 (None, Some(p)) => p,
                 (None, None) => anyhow::bail!("decision returned neither outputArg nor outputPath"),
             };
-            finalize_defer(&output_path, record)
+            match mode {
+                DyndrvMode::Sandbox => finalize_defer(&output_path, record),
+                DyndrvMode::Rpc { autoforce } => {
+                    let drv_name = Path::new(&output_path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| output_path.clone());
+                    run_rpc_tail(client, &output_path, record, &drv_name, autoforce)
+                }
+            }
         }
     }
 }
@@ -79,6 +93,16 @@ where
 /// rewritten to its own store path -- port of `wrapCommand.nix`'s
 /// rewrite loop (`nix store add-file`, here `add_to_store_flat` --
 /// same CA method, no subprocess).
+///
+/// `StorePath`'s own `Display` impl prints just `<hash>-<name>` (the
+/// base path form, matching Nix's internal convention -- see
+/// `harmonia_store_path::StorePath`'s own doc), NOT the full
+/// `/nix/store/<hash>-<name>` path -- confirmed by direct reproduction
+/// that using it bare here produced a rendered command line referencing
+/// a nonexistent RELATIVE path (`ar cr $out jqrq2...-a.o`, no
+/// directory), and separately broke `extra_store_paths`' own
+/// `/nix/store/` prefix-detection downstream. The full absolute path
+/// must be reconstructed explicitly.
 fn rewrite_argv_element(client: &BuilderRpcClient, a: &str) -> anyhow::Result<String> {
     if a.starts_with("/nix/store/") || a.starts_with('-') {
         return Ok(a.to_string());
@@ -91,7 +115,7 @@ fn rewrite_argv_element(client: &BuilderRpcClient, a: &str) -> anyhow::Result<St
             .unwrap_or_else(|| a.to_string());
         let bytes = std::fs::read(path)?;
         let store_path = client.add_to_store_flat(&name, &bytes)?;
-        return Ok(store_path.to_string());
+        return Ok(format!("/nix/store/{store_path}"));
     }
     Ok(a.to_string())
 }

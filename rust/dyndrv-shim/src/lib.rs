@@ -1,6 +1,9 @@
 pub mod collect;
+pub mod drv;
+pub mod mode;
 pub mod record;
 pub mod render;
+pub mod rpc_tail;
 pub mod stub;
 pub mod tonode;
 pub mod wrapper;

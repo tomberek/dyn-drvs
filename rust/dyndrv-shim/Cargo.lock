@@ -230,6 +230,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "harmonia-store-aterm",
  "harmonia-store-content-address",
  "harmonia-store-derivation",
  "harmonia-store-path",

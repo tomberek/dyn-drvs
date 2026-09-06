@@ -36,6 +36,7 @@ let
       wrapCommand = callLib ./lib/shim/wrapCommand.nix;
       collectStubs = callLib ./lib/shim/collectStubs.nix;
       batchStub = callLib ./lib/shim/batchStub.nix;
+      devShell = callLib ./lib/shim/devShell.nix;
     };
 
     phases = {

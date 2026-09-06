@@ -18,6 +18,7 @@ nix-builder-rpc-client = { path = "../vendor/nix-builder-rpc-client" }
 harmonia-store-derivation = { path = "../vendor/harmonia/harmonia-store-derivation" }
 harmonia-store-path = { path = "../vendor/harmonia/harmonia-store-path" }
 harmonia-store-content-address = { path = "../vendor/harmonia/harmonia-store-content-address" }
+harmonia-store-aterm = { path = "../vendor/harmonia/harmonia-store-aterm" }
 harmonia-utils-hash = { path = "../vendor/harmonia/harmonia-utils-hash" }
 anyhow = "1.0"
 bytes = "1"

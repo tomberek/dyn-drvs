@@ -154,13 +154,17 @@
 #   store add-file`/`add` subprocess -- the binary does its own argv
 #   rewriting, decision logic, and stub-write natively, using the raw
 #   daemon worker-protocol client (`nix-builder-rpc-client`) for staging.
-#   Takes priority over `toNodeBash`/`toNode` when set. `argv[0]` as the
-#   binary sees it is set to THIS wrapper's own `command` param (via
-#   `exec -a`, a bash builtin -- confirmed necessary by direct
-#   reproduction: a plain `exec dyndrv-shim "$@"` leaves `argv[0]` as the
-#   REAL binary's own path, not the intercepted tool name, so the
-#   binary's own `argv[0]`-based dispatch never matches) -- the binary
-#   dispatches its OWN decision logic ("ar"/"ranlib"/"cc") from that.
+#   Takes priority over `toNodeBash`/`toNode` when set. `DYNDRV_TOOL` is
+#   set to THIS wrapper's own `command` param and exported before the
+#   exec, so the binary knows which decision logic to dispatch to
+#   ("ar"/"ranlib"/"cc") -- NOT `argv[0]`/`exec -a`: confirmed by direct
+#   reproduction that this wrapper's own `#!/bin/sh` is NOT always bash
+#   the way a Nix sandbox's `/bin/sh` is (only nixpkgs' own stdenv
+#   guarantees that -- see `toNode`'s bash-availability comment above);
+#   run directly on a host whose real `/bin/sh` is dash (e.g. via
+#   `shim.devShell`'s wrapper, outside any sandbox), `exec -a` is a
+#   bash-only builtin and fails outright ("exec: -a: not found"). A
+#   plain env var works under any POSIX `/bin/sh`.
 #   `compiledEnv`: extra env vars (name -> value strings) the binary's own
 #   decision logic needs (e.g. `DYNDRV_REAL_COMMAND`/
 #   `DYNDRV_BINTOOLS_BASENAME` for `ar`/`ranlib`) -- exported before the
@@ -296,7 +300,8 @@ in
         ${lib.concatStringsSep "\n" (
           lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") compiledEnv
         )}
-        exec -a "${command}" ${toNodeCompiled}/bin/dyndrv-shim "$@"
+        export DYNDRV_TOOL=${lib.escapeShellArg command}
+        exec ${toNodeCompiled}/bin/dyndrv-shim "$@"
       ''
     else if discoverTree == null then
       ''
