@@ -66,15 +66,27 @@ pub fn run_rpc_tail(
         let file = std::fs::File::open(output_path)?;
         file.set_modified(now)?;
     } else {
-        // Deferred (no autoforce): leave a batch-pending stub at the
-        // caller-visible path, same on-disk format `Sandbox` mode uses,
-        // so a later `nixgg force`-equivalent (task #64's thunk-file
-        // machinery, or a direct `nix build` on the registered drv) can
-        // still resolve it. The record itself is no longer needed on
-        // disk (the derivation is ALREADY registered, unlike `Sandbox`
-        // mode) -- store the real, already-known drv path directly
-        // instead of a record file path.
-        crate::stub::write_batch_stub(Path::new(output_path), Path::new(&drv_path.to_base_path()))?;
+        // Deferred (no autoforce): symlink the caller-visible path
+        // straight at the registered `.drv`'s own store path, instead
+        // of `Sandbox` mode's text-based stub -- `Rpc` mode already has
+        // a real, registered `StorePath` in hand here, and (unlike
+        // `Sandbox` mode) never runs inside a `builder-rpc-v0` sandbox,
+        // so this path IS locally resolvable by a later invocation in
+        // the same devShell session (confirmed safe: task #83's own
+        // spike found the OPPOSITE only holds INSIDE a sandbox, which
+        // `Rpc` mode structurally never is -- see `mode.rs`'s own
+        // `in_sandbox()` check). A later `nixgg force`-equivalent (a
+        // direct `nix build` on the drv, or another shim invocation
+        // resolving this symlink via `stub::read_pending_symlink`) can
+        // still find the real derivation this way, with no on-disk
+        // record file needed at all -- the derivation is ALREADY
+        // registered, unlike `Sandbox` mode's own deferred JSON record.
+        let abs_drv_path = format!("/nix/store/{drv_path}");
+        if let Some(parent) = Path::new(output_path).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let _ = std::fs::remove_file(output_path);
+        std::os::unix::fs::symlink(&abs_drv_path, output_path)?;
     }
 
     Ok(())

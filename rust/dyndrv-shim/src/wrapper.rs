@@ -166,7 +166,7 @@ where
                     && !tok.starts_with('-')
                     && !tok.starts_with('/')
                     && Path::new(tok).is_file()
-                    && stub::read_batch_stub(Path::new(tok)).is_none()
+                    && !stub::is_pending(Path::new(tok))
                 {
                     all_paths.push(tok.to_string());
                 }
@@ -196,7 +196,7 @@ where
         // collect`'s own dependency scan to resolve into a real
         // cross-unit reference later; only genuinely real files get
         // staged here. Port of `wrapCommand.nix`'s own identical guard.
-        if Path::new(a).is_file() && stub::read_batch_stub(Path::new(a)).is_none() {
+        if Path::new(a).is_file() && !stub::is_pending(Path::new(a)) {
             all_paths.push(a.clone());
         }
     }
@@ -305,7 +305,7 @@ fn rewrite_argv_element(client: &BuilderRpcClient, a: &str) -> anyhow::Result<St
         return Ok(a.to_string());
     }
     let path = Path::new(a);
-    if path.is_file() && stub::read_batch_stub(path).is_none() {
+    if path.is_file() && !stub::is_pending(path) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
