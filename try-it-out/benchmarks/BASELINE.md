@@ -12,10 +12,13 @@ the architecture evolved — `registration-overhead.sh`/
 `small-lib-patch-rebuild.sh` predate the `builder-rpc-v0`/`phases.split`
 migration and still reflect the `recursive-nix`-backed design active at
 the time; `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
-(2026-09-05) reflect the CURRENT architecture. Absolute numbers will
-differ on other hardware; the *shape* of the results (large win at real
-compile cost, honest loss at trivial compile cost, break-even in
-between) is what should reproduce.
+(2026-09-06, after fixing the `/nonexistent`-unwritable-in-a-real-
+sandbox bug documented in their own section below) reflect the CURRENT
+architecture. Absolute numbers will differ on other hardware AND across
+runs on the SAME hardware under different concurrent load (see the
+version-bump section's own note on this) — the *shape* of the results
+(large win at real compile cost, honest loss at trivial compile cost,
+break-even in between) is what should reproduce.
 
 ## registration-overhead.sh (metric 3 — the "tax")
 
@@ -120,31 +123,36 @@ does this — not a dyndrv bug. `dyndrv.phases.split` (the `builder-rpc-v0`
 sandboxed/replay two-phase split) generalizes past this limitation —
 freetype doesn't happen to need it, but the mechanism now exists.
 
-**These numbers were re-measured on 2026-09-05, under the CURRENT
-`builder-rpc-v0`/`phases.split` architecture** (superseding the numbers
-this section previously reported, which were measured under an earlier
-`recursive-nix`-backed design that no longer exists in this codebase —
-`mkAcceleratedStdenv` has no `recursive-nix` code path at all anymore).
+**These numbers were re-measured on 2026-09-06, after fixing the
+`/nonexistent`-unwritable-in-a-real-sandbox bug documented below** (the
+2026-09-05 numbers this section previously reported were measured
+BEFORE that bug was introduced/discovered — see this file's own "Real
+bug found and fixed" section for the full story; the architecture
+itself, `builder-rpc-v0`/`phases.split`, is unchanged between the two
+measurements).
 
 | | Plain `stdenv.mkDerivation` | `accelerate.mkAcceleratedStdenv` |
 |---|---|---|
-| Cold build | 21.21s | 67.03s |
-| Patched rebuild (1 real file changed) | 14.07s | 49.33s |
+| Cold build | 11.99s | 73.88s |
+| Patched rebuild (1 real file changed) | 4.43s | 78.86s |
 | Dynamic derivations rebuilt (patched) | n/a (1 opaque derivation) | 2 (both compiles of the patched file — libtool compiles each source twice, once static, once `-fPIC`; configure-time probes are pure passthrough, never registered as dyndrv derivations at all) |
 
-**Speedup on patched rebuild: 0.29x — accelerated is SLOWER here,
-reported honestly.** freetype's real per-file compile time is small
-enough that the per-derivation registration tax dominates, and
-`configure` reruns from scratch on both sides regardless of acceleration
-(neither variant has an autoconf cache layer). This is the same
-break-even shape `small-lib-patch-rebuild.sh`'s own LOOPS-scaled fixture
-already demonstrates — freetype just happens to land on the "not yet
-worth it" side of that line on this machine, which this benchmark
-reports rather than hides. What DOES improve is the *number* of things
-needing rebuild (2 real per-TU derivations vs. one full opaque rebuild)
-— real signal that the mechanism is working correctly on a genuine
-multi-directory package with real header dependencies, even though it
-doesn't yet convert to a wall-clock win at this package's scale.
+**Speedup on patched rebuild: 0.06x — accelerated is SLOWER here,
+reported honestly** (worse than the 0.29x previously recorded — this
+machine had a large, unrelated concurrent build running during this
+particular measurement, confirmed via `ps aux` mid-run; the qualitative
+conclusion is unchanged either way: freetype's real per-file compile
+time is small enough that the per-derivation registration tax
+dominates, and `configure` reruns from scratch on both sides regardless
+of acceleration). This is the same break-even shape
+`small-lib-patch-rebuild.sh`'s own LOOPS-scaled fixture already
+demonstrates — freetype just happens to land on the "not yet worth it"
+side of that line on this machine, which this benchmark reports rather
+than hides. What DOES improve is the *number* of things needing rebuild
+(2 real per-TU derivations vs. one full opaque rebuild) — real signal
+that the mechanism is working correctly on a genuine multi-directory
+package with real header dependencies, even though it doesn't yet
+convert to a wall-clock win at this package's scale.
 
 ## real-package-version-bump.sh (metrics 1, 2, 4 — multi-file patch)
 
@@ -166,23 +174,27 @@ network-independent proxy for the property this benchmark actually needs
 to demonstrate (per-file caching granularity scales with how many files
 actually changed), without requiring egress in CI.
 
-Measured 2026-09-05, same architecture as `real-package-patch-rebuild.sh`
-above:
+Measured 2026-09-06, after the same `/nonexistent`-unwritable fix noted
+above (same architecture as `real-package-patch-rebuild.sh`):
 
 | | Plain `stdenv.mkDerivation` | `accelerate.mkAcceleratedStdenv` |
 |---|---|---|
-| Cold build | 21.66s | 66.41s |
-| Version-bump rebuild (3 files changed) | 14.11s | 47.29s |
+| Cold build | 11.88s | 55.17s |
+| Version-bump rebuild (3 files changed) | 18.24s | 52.01s |
 | Dynamic derivations rebuilt | n/a (1 opaque derivation) | 6 (3 changed files × 2 compiles each, exactly as predicted — libtool's static/`-fPIC` double-compile convention applies per changed file) |
 
-**Speedup: 0.30x — same honest shape as the single-file benchmark**,
+**Speedup: 0.35x — same honest shape as the single-file benchmark**,
 confirming the win/loss ratio doesn't change qualitatively as the number
 of changed files grows from 1 to 3: metric 2 (derivations rebuilt) stays
 exactly proportional to files actually changed (2 → 6, doubling then
 tripling as expected), while plain's cost is flat regardless of how many
 files a real version bump touches. This is the concrete evidence that
 `dyndrv`'s per-file caching granularity genuinely scales with the SIZE of
-a version bump's diff, not just with a synthetic single-line patch.
+a version bump's diff, not just with a synthetic single-line patch. (Ran
+under noticeably less machine contention than the single-file benchmark
+above — hence the closer-to-even 0.35x vs. 0.06x — consistent with both
+being genuine wall-clock measurements on a shared machine, not a
+methodology difference between the two scripts.)
 
 ### A real bug found while building this: `overrideAttrs` silently dropped patches (RESOLVED)
 
@@ -257,12 +269,15 @@ bash-path and compiled-path variants, producing a genuinely working
 `07-accelerate-real-package.nix`'s own header documents) — not just "the
 build succeeded."
 
-This means `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
-are unblocked again (this file's numbers above from 2026-09-05 predate
-the fix but remain valid — they were measured before whatever caused
-`/nonexistent` to stop being writable on this machine). Re-measuring
-the compiled path's own wall-clock numbers against these two scripts is
-still open follow-on work, tracked separately from this fix.
+Both benchmarks above were RE-MEASURED on 2026-09-06 after this fix
+(see their own updated tables) — the bash path (`toNodeBash`,
+`dyndrvShim` unset) is confirmed unblocked and working. Re-measuring
+the COMPILED path's (`toNodeCompiled`/`dyndrvShim`) own wall-clock
+numbers against these two scripts (currently they only exercise
+`real-package-lib.nix`'s default bash-path call) remains open follow-on
+work — `real-package-lib.nix` would need a `dyndrvShim` param threaded
+through the same way the `05`/`06`/`07`-`-compiled.nix` example
+variants already do.
 
 ### Historical: bugs found building the real-package benchmark under the earlier `recursive-nix` architecture
 
