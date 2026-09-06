@@ -5,5 +5,7 @@ pub mod record;
 pub mod render;
 pub mod rpc_tail;
 pub mod stub;
+pub mod thunk;
+pub mod thunk_tail;
 pub mod tonode;
 pub mod wrapper;

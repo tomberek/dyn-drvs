@@ -1,3 +1,16 @@
+/// Which format a `Thunk`-mode tail writes to disk. `Nix` mirrors
+/// nixgg's own default native mode exactly (a plain `.nix` expression,
+/// realized later via `nix build --file`); `Drv` is EXPERIMENTAL (task
+/// #65) -- writes a real ATerm-serialized `.drv` file directly, no
+/// daemon call at all for the write itself, realized via `nix-store
+/// --realise`/`nix build <path>.drv^out`. Never auto-selected; only
+/// reachable via an explicit `DYNDRV_THUNK_FORMAT=drv` override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThunkFormat {
+    Nix,
+    Drv,
+}
+
 /// Which tail a shim invocation runs, decided once per process (not per
 /// call site) -- mirrors nixgg's own `sandbox.Enabled()` as the sole
 /// branch point in its shim entrypoints, with one more rung here since
@@ -13,6 +26,15 @@ pub enum DyndrvMode {
     /// `autoforce`, also realize it (`build_paths`) and copy the result
     /// back over the caller-visible path.
     Rpc { autoforce: bool },
+    /// devShell/native, NO experimental-features requirement at all:
+    /// write a `.nix`/`.drv` thunk file to disk, symlink the
+    /// caller-visible output at it. If `autoforce`, realize the whole
+    /// thunk graph immediately (link/archive steps only -- mirrors
+    /// nixgg's own link-shim-only `NIXGG_AUTOFORCE` trigger).
+    Thunk {
+        format: ThunkFormat,
+        autoforce: bool,
+    },
 }
 
 /// Auto-detects the mode from the environment, mirroring
@@ -22,15 +44,30 @@ pub enum DyndrvMode {
 /// else (assumed to be an interactive devShell or plain command
 /// invocation) -> `Rpc`, with `autoforce` from `DYNDRV_AUTOFORCE=1`.
 ///
-/// `DYNDRV_MODE=sandbox|rpc` overrides auto-detection outright, for
-/// tests/CI. `Thunk` mode (task #64, the no-experimental-features
-/// fallback) is not yet auto-selected by anything -- only reachable via
-/// an explicit future `DYNDRV_MODE=thunk`.
+/// `DYNDRV_MODE=sandbox|rpc|thunk` overrides auto-detection outright,
+/// for tests/CI and for reaching `Thunk` mode at all (never
+/// auto-selected -- `Rpc` mode's own requirements, `ca-derivations`/
+/// `dynamic-derivations`, are ALWAYS assumed available outside a
+/// sandbox in this codebase's own established policy, matching
+/// `capabilities.nix`'s "assume `builder-rpc-v0`, don't detect" stance;
+/// a caller who genuinely lacks them opts into `Thunk` explicitly).
+/// `DYNDRV_THUNK_FORMAT=nix|drv` (only consulted when `Thunk` is
+/// selected) picks the format; defaults to `nix`.
 pub fn detect() -> DyndrvMode {
     let autoforce = std::env::var("DYNDRV_AUTOFORCE").as_deref() == Ok("1");
+    let thunk_format = match std::env::var("DYNDRV_THUNK_FORMAT").ok().as_deref() {
+        Some("drv") => ThunkFormat::Drv,
+        _ => ThunkFormat::Nix,
+    };
     match std::env::var("DYNDRV_MODE").ok().as_deref() {
         Some("sandbox") => return DyndrvMode::Sandbox,
         Some("rpc") => return DyndrvMode::Rpc { autoforce },
+        Some("thunk") => {
+            return DyndrvMode::Thunk {
+                format: thunk_format,
+                autoforce,
+            }
+        }
         _ => {}
     }
     let in_sandbox =

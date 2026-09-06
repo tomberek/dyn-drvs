@@ -2,6 +2,7 @@ use crate::mode::DyndrvMode;
 use crate::record::Record;
 use crate::rpc_tail::run_rpc_tail;
 use crate::stub;
+use crate::thunk_tail::run_thunk_tail;
 use crate::tonode::Decision;
 use nix_builder_rpc_client::BuilderRpcClient;
 use std::path::Path;
@@ -82,6 +83,9 @@ where
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| output_path.clone());
                     run_rpc_tail(client, &output_path, record, &drv_name, autoforce)
+                }
+                DyndrvMode::Thunk { format, autoforce } => {
+                    run_thunk_tail(&output_path, record, format, autoforce)
                 }
             }
         }
