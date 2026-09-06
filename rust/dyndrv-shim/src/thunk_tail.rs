@@ -2,6 +2,8 @@ use crate::drv_thunk;
 use crate::mode::ThunkFormat;
 use crate::record::Record;
 use crate::thunk;
+use anyhow::Context;
+use nix_builder_rpc_client::BuilderRpcClient;
 use std::path::Path;
 
 /// `Thunk` mode tail: write a `.nix` (or, experimentally, `.drv`)
@@ -14,23 +16,18 @@ use std::path::Path;
 /// --no-link --print-out-paths --file <helper>` over the whole
 /// transitively-referenced thunk graph (mirrors nixgg's own
 /// `realise.Realise`), then copies the real bytes back over
-/// `output_path`. `Drv` format's own autoforce path realizes via
-/// `nix-store --add` (register the file, no build) then `nix-store
-/// --realise` -- CONFIRMED necessary by direct reproduction: neither
-/// `nix-store --realise` nor `nix build <path>^out` accept a `.drv` at
-/// an arbitrary FILESYSTEM path directly ("is not in the Nix
-/// store"/"is not a flake") -- only an already-registered store path
-/// works, so the originally-hoped-for "no daemon call at all, not even
-/// for realization" property does NOT hold for this format's
-/// autoforce path (the write itself is still daemon-free; only
-/// REALIZING it needs one `--add`). Nix's own dependency resolution
-/// still walks a real `.drv`'s `inputDrvs` transitively once
-/// registered, so a MULTI-node graph (not built by this experimental
-/// format yet -- see `drv_thunk.rs`'s own single-node-only caveat)
-/// would still need no separate thunk-graph helper file the way
-/// `Nix`-format thunks do -- just each node individually `--add`ed
-/// before the root's own `--realise`.
+/// `output_path`. `Drv` format's own autoforce path registers every
+/// TRANSITIVELY-referenced `.drv` (via `add_to_store_text`, the SAME
+/// CA method `add_drv_to_store` uses internally -- see
+/// `realise_drv_and_promote`'s own doc for why this, not `nix-store
+/// --add`, is required for a multi-node graph), then `nix-store
+/// --realise`s the root. Nix's own dependency resolution then walks
+/// the root's real `.drv`'s `inputDrvs` transitively on its own, so a
+/// MULTI-node graph needs no separate thunk-graph helper file the way
+/// `Nix`-format thunks do -- just every node registered at its own
+/// REAL (not flat-CA) store identity before the root's own `--realise`.
 pub fn run_thunk_tail(
+    client: &BuilderRpcClient,
     output_path: &str,
     record: Record,
     format: ThunkFormat,
@@ -38,11 +35,16 @@ pub fn run_thunk_tail(
 ) -> anyhow::Result<()> {
     match format {
         ThunkFormat::Nix => run_nix_format(output_path, &record, autoforce),
-        ThunkFormat::Drv => run_drv_format(output_path, &record, autoforce),
+        ThunkFormat::Drv => run_drv_format(client, output_path, &record, autoforce),
     }
 }
 
-fn run_drv_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow::Result<()> {
+fn run_drv_format(
+    client: &BuilderRpcClient,
+    output_path: &str,
+    record: &Record,
+    autoforce: bool,
+) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let workspace = thunk::resolve_workspace(&cwd);
 
@@ -75,7 +77,7 @@ fn run_drv_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow
     thunk::link_placeholder(&output_abs, &drv_path)?;
 
     if autoforce {
-        realise_drv_and_promote(&output_abs, &drv_path)?;
+        realise_drv_and_promote(client, &output_abs, &drv_path)?;
     }
 
     Ok(())
@@ -89,35 +91,52 @@ fn run_drv_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow
 /// store"/"is not a flake") -- Nix's builder/scheduler machinery only
 /// ever operates on an ALREADY-REGISTERED store path, never a raw
 /// on-disk file, no matter how well-formed its ATerm content is. The
-/// file must be added to the store FIRST (`nix-store --add`, itself
-/// just a local content-addressed file copy -- no scheduling, no
-/// build, negligible overhead) before `--realise` will accept it.
-/// Confirmed the resulting (flat-CA, name-mismatched-from-the-
-/// derivation's-own-declared-name) added path still realizes
-/// CORRECTLY despite the naming mismatch -- Nix parses the ATerm's own
-/// declared `name` field to compute the real output path, not the
-/// `.drv` file's own on-disk basename.
-fn realise_drv_and_promote(output_abs: &Path, drv_path: &Path) -> anyhow::Result<()> {
-    let add_out = std::process::Command::new("nix-store")
-        .arg("--add")
-        .arg(drv_path)
-        .output()?;
-    if !add_out.status.success() {
-        anyhow::bail!(
-            "nix-store --add {} failed: {}",
-            drv_path.display(),
-            String::from_utf8_lossy(&add_out.stderr)
-        );
-    }
-    let added_drv_path = String::from_utf8_lossy(&add_out.stdout).trim().to_string();
+/// file must be added to the store FIRST.
+///
+/// SECOND FINDING (task #80, confirmed by direct reproduction against
+/// a real multi-node graph): `nix-store --add`'s own FLAT-CA naming
+/// produces a DIFFERENT store path than a `.drv`'s own logical
+/// `text:sha256` identity (`compute_drv_store_path`'s own computation,
+/// matching what `add_drv_to_store` registers internally) -- fine for
+/// a SINGLE, standalone `.drv` handed directly to `--realise` (nothing
+/// else references that specific path, so the mismatch is harmless),
+/// but NOT fine for a multi-node graph: a dependent's own `inputDrvs`
+/// entry references the dependency's REAL logical identity, and
+/// `--realise` fails outright ("store path '...' does not exist") if
+/// that exact path was never registered, regardless of whether SOME
+/// path with the same CONTENT exists under a different (flat-CA) name.
+/// Confirmed by direct reproduction: `nix-store --add`ing every `.drv`
+/// in a two-compile-plus-archive graph individually still left
+/// `--realise` failing on the root, since none of the resulting
+/// flat-CA paths matched what the root's own `inputDrvs` field
+/// actually names.
+///
+/// The fix: register every `.drv` (root AND every transitively-
+/// referenced dependency, walking `inputDrvs` recursively) via
+/// `add_to_store_text` -- a REAL daemon RPC call using
+/// `ContentAddressMethodAlgorithm::Text`, the SAME CA method
+/// `add_drv_to_store` uses internally, so the resulting store path
+/// matches `compute_drv_store_path`'s own computation exactly (unlike
+/// `nix-store --add`'s CLI-only Flat CA method). This still needs no
+/// `nix build`/scheduling call except the one final `--realise` on the
+/// root -- `add_to_store_text` is a plain content-addressed upload, no
+/// build involved, matching the "cheap, no build" cost this plan's own
+/// original finding already established for the single-node case.
+fn realise_drv_and_promote(
+    client: &BuilderRpcClient,
+    output_abs: &Path,
+    drv_path: &Path,
+) -> anyhow::Result<()> {
+    let store_dir = harmonia_store_path::StoreDir::default();
+    let added_root = register_drv_tree(client, &store_dir, drv_path)?;
 
     let out = std::process::Command::new("nix-store")
         .args(["--realise", "--extra-experimental-features", "ca-derivations"])
-        .arg(&added_drv_path)
+        .arg(format!("/nix/store/{added_root}"))
         .output()?;
     if !out.status.success() {
         anyhow::bail!(
-            "nix-store --realise {added_drv_path} failed: {}",
+            "nix-store --realise /nix/store/{added_root} failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -132,6 +151,86 @@ fn realise_drv_and_promote(output_abs: &Path, drv_path: &Path) -> anyhow::Result
     let file = std::fs::File::open(output_abs)?;
     file.set_modified(now)?;
     Ok(())
+}
+
+/// Recursively registers `drv_path` and every `.drv` it (transitively)
+/// references via `inputDrvs`, bottom-up (dependencies before
+/// dependents, so `add_to_store_text` never sees an `inputDrvs`
+/// reference to a not-yet-registered path), via `add_to_store_text` --
+/// see `realise_drv_and_promote`'s own doc for why this specific call,
+/// not `nix-store --add`, is required. Parses each `.drv`'s own ATerm
+/// bytes (`harmonia_store_aterm::parse_derivation_aterm`) to discover
+/// its `inputDrvs` -- the `deps` map built by `run_drv_format`'s own
+/// scan only covers ONE level (this record's immediate positional
+/// args), so a graph deeper than 2 levels (e.g. an `ar` archive
+/// consumed by a further link step, itself a `.drv`-thunk dependency)
+/// needs this recursive walk to register every ancestor, not just the
+/// immediate ones `write_drv_thunk` already wired into the root's own
+/// `inputDrvs`.
+fn register_drv_tree(
+    client: &BuilderRpcClient,
+    store_dir: &harmonia_store_path::StoreDir,
+    drv_path: &Path,
+) -> anyhow::Result<harmonia_store_path::StorePath> {
+    let aterm_bytes = std::fs::read(drv_path)
+        .with_context(|| format!("read {}", drv_path.display()))?;
+    let store_path =
+        drv_thunk::compute_drv_store_path(store_dir, "dyndrv-thunk", &aterm_bytes)?;
+
+    // Parse the ATerm to discover this drv's own `inputDrvs` -- each
+    // entry is an ABSOLUTE store path (possibly not yet registered,
+    // since `write_drv_thunk` only ever computed it locally, never
+    // called `add_drv_to_store`). Recurse into each one FIRST (bottom-
+    // up), matching it against the `.drv` files sitting in the SAME
+    // `.dyndrv/thunks-drv/` directory by RE-COMPUTING each candidate's
+    // own store path and comparing (thunk files are named by a content
+    // hash of their OWN ATerm bytes, a different value than the store
+    // path's own hash, so the store hash can't be used to guess the
+    // filename directly). A reference to something that ISN'T a dyndrv
+    // thunk (a real, already-registered dependency, e.g. a toolchain
+    // package) has no match here and is left alone -- `add_to_store_
+    // text` only ever concerns thunk-produced `.drv`s, real store
+    // paths need no registration.
+    let name: harmonia_store_path::StorePathName =
+        "dyndrv-thunk".parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let parsed = harmonia_store_aterm::parse_derivation_aterm(store_dir, &aterm_bytes, name)
+        .map_err(|e| anyhow::anyhow!("parse_derivation_aterm {}: {e:?}", drv_path.display()))?;
+    let input_drv_paths: Vec<harmonia_store_path::StorePath> = parsed
+        .inputs
+        .iter()
+        .filter_map(|p| match p {
+            harmonia_store_derivation::derived_path::SingleDerivedPath::Built {
+                drv_path, ..
+            } => Some(drv_path.root_path().clone()),
+            harmonia_store_derivation::derived_path::SingleDerivedPath::Opaque(_) => None,
+        })
+        .filter(|sp| sp.is_derivation())
+        .collect();
+    if !input_drv_paths.is_empty() {
+        let thunks_dir = drv_path.parent().unwrap_or(Path::new("."));
+        for entry in std::fs::read_dir(thunks_dir)
+            .with_context(|| format!("read_dir {}", thunks_dir.display()))?
+        {
+            let entry = entry?;
+            let candidate = entry.path();
+            if candidate == drv_path || candidate.extension().and_then(|e| e.to_str()) != Some("drv")
+            {
+                continue;
+            }
+            let candidate_bytes = std::fs::read(&candidate)
+                .with_context(|| format!("read {}", candidate.display()))?;
+            let candidate_path =
+                drv_thunk::compute_drv_store_path(store_dir, "dyndrv-thunk", &candidate_bytes)?;
+            if input_drv_paths.contains(&candidate_path) {
+                register_drv_tree(client, store_dir, &candidate)?;
+            }
+        }
+    }
+
+    client
+        .add_to_store_text("dyndrv-thunk.drv", &aterm_bytes)
+        .with_context(|| format!("add_to_store_text {}", drv_path.display()))?;
+    Ok(store_path)
 }
 
 fn run_nix_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow::Result<()> {

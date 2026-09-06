@@ -280,7 +280,7 @@ fn dispatch_defer(
             run_rpc_tail(client, output_path, record, &drv_name, autoforce)
         }
         DyndrvMode::Thunk { format, autoforce } => {
-            run_thunk_tail(output_path, record, format, autoforce)
+            run_thunk_tail(client, output_path, record, format, autoforce)
         }
     }
 }
