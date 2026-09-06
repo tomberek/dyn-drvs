@@ -303,12 +303,73 @@ plan; any eager-registration redesign of `Sandbox` mode's file- or
 module-granularity paths must budget for this daemon round-trip's
 latency, not assume a free local `stat`.
 
+## `Thunk{Drv}`'s multi-node graph: built, verified (tasks #77-82)
+
+The single-node limitation flagged in the "Experimental finding" above
+is resolved — `Thunk{format: Drv}` now chains real `inputDrvs` across
+multiple `.drv`-format thunks (see `docs/drv-thunk-multinode-design.md`
+for the original design). Summary:
+
+- **`compute_drv_store_path`** (`drv_thunk.rs`): computes a `.drv`'s own
+  content-addressed `StorePath` locally, no daemon call, via
+  `harmonia_store_content_address::make_store_path_from_ca` +
+  `ContentAddress::Text(Sha256::digest(aterm_bytes))` — mirrors what
+  `add_drv_to_store`'s server side computes internally. Verified
+  byte-identical against a real `add_drv_to_store` call for two
+  independently-generated derivations (a throwaway check binary, built,
+  run twice, then deleted).
+- **Dependency scan + `inputDrvs` wiring** (`thunk_tail.rs`::
+  `run_drv_format`, `drv_thunk.rs`::`write_drv_thunk`/
+  `resolve_drv_thunk_dependency`): before writing a record's own `.drv`,
+  scans `record.args` for elements that are symlinks into
+  `.dyndrv/thunks-drv/` (an earlier, already-completed shim
+  invocation's own thunk), resolves each one's real `StorePath`, and
+  wires it as a `SingleDerivedPath::Built` `inputDrvs` edge — with the
+  script's own literal argv reference substituted for the dependency's
+  real placeholder token (`Placeholder::ca_output`). Verified directly:
+  a two-compile-plus-archive graph's own `ar` derivation correctly
+  lists both compiles' real store paths in `inputDrvs`.
+- **Real bug found and fixed along the way**: `stub::is_pending`
+  (the "is this argv element a placeholder, not real content" check
+  every argv-rewrite guard uses) never recognized a `Thunk{Drv}`
+  symlink as pending — only `Sandbox`'s text stub and `Rpc`'s
+  store-path symlink. Without this, `rewrite_argv_element` staged a
+  `.drv`-thunk symlink's own ATerm bytes as if they were real object
+  content, corrupting the dependent derivation (empty `inputDrvs`,
+  bogus store paths in the script) — confirmed by direct reproduction,
+  fixed by having `is_pending` also check `resolve_drv_thunk_dependency`.
+- **Multi-node realization, the plan's own crux unverified claim,
+  confirmed FALSE as originally hoped, then fixed**: `nix-store
+  --realise` on a `--add`ed root `.drv` does NOT resolve `inputDrvs`
+  entries pointing at `.drv` files that were never themselves
+  registered ("store path '...' does not exist") — confirmed by direct
+  reproduction. Worse, `nix-store --add`'s own FLAT-CA naming produces
+  a DIFFERENT path than a `.drv`'s real `text:sha256` identity, so
+  `--add`ing every file individually doesn't help either — the
+  resulting paths don't match what `inputDrvs` actually names. Fixed
+  with `register_drv_tree` (`thunk_tail.rs`): parses each `.drv`'s own
+  ATerm to discover its `inputDrvs`, recurses bottom-up matching
+  against sibling `.drv` files by re-computing their store paths, and
+  registers each one via `add_to_store_text` — the SAME CA method
+  `add_drv_to_store` uses internally, so the resulting path matches
+  `compute_drv_store_path`'s own computation exactly. Still no `nix
+  build`/scheduling call except the one final `--realise` on the root.
+- **Verified end-to-end** with a real three-node graph (two compiles +
+  one archive) under `DYNDRV_AUTOFORCE=1` on just the archive step (NOT
+  globally — `DYNDRV_AUTOFORCE` is read unconditionally by every
+  invocation including `cc`, so forcing it globally eagerly promotes
+  compiles to real files before `ar` ever sees a `.drv`-thunk symlink,
+  never exercising cross-drv chaining at all — confirmed by direct
+  reproduction on the fixture's own first draft): the archive's own
+  `inputDrvs` correctly resolves both compiles' real outputs, producing
+  a genuinely valid `liba.a` that links and runs correctly (11+22=33).
+  Kept as a permanent regression fixture,
+  `rust/dyndrv-shim/drv-thunk-multinode-test.sh` (a plain shell script,
+  not a Nix derivation, since `Thunk` mode's whole design point is
+  working outside any sandbox).
+
 ## What's still follow-on work
 
-- `Thunk { format: Drv }`'s multi-node graph case (real `inputDrvs`
-  chaining across several dyndrv-produced `.drv` files) is unbuilt —
-  only verified against a single-node fixture. See `docs/drv-thunk-
-  multinode-design.md` for the design.
 - Batching across the transitive thunk graph for `Thunk { format: Nix
   }`'s own autoforce path (nixgg's own `realise.Realise`) is unbuilt —
   only the single-thunk case works today.
@@ -320,3 +381,9 @@ latency, not assume a free local `stat`.
   `/nonexistent`-unwritable-in-a-real-sandbox bug this attempt found and
   fixed along the way, switching the placeholder to `/build/dyndrv-
   placeholder-out`).
+- The symlink-based intermediate-representation redesign for `Sandbox`
+  mode's file- and module-granularity paths (see the design's own plan
+  file) is still open — Design B (daemon `IsValidPath`, per the spike
+  finding above) needs that primitive added to `nix-builder-rpc-client`
+  first; `Rpc` mode's own half of this redesign is done (real symlinks
+  instead of a text stub).
