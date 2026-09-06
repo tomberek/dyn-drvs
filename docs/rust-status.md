@@ -192,5 +192,13 @@ generated files at all.
   }`'s own autoforce path (nixgg's own `realise.Realise`) is unbuilt —
   only the single-thunk case works today.
 - Re-measuring `real-package-patch-rebuild.sh`/
-  `real-package-version-bump.sh` against the compiled path and updating
-  `BASELINE.md` accordingly is still open.
+  `real-package-version-bump.sh` against the compiled path is BLOCKED
+  in the current environment, not just open — see `BASELINE.md`'s own
+  "Compiled-shim re-measurement: BLOCKED" section: both the bash-path
+  and compiled-path accelerated freetype builds now fail identically on
+  this machine at `phases.split`'s phase 2 `installPhase` (`mkdir:
+  cannot create directory '/nonexistent': Permission denied`),
+  confirmed environmental (the UNMODIFIED bash-path script fails the
+  same way with no `dyndrvShim` involved at all) and unrelated to
+  correctness — examples 05/06/07 all still build and run correctly
+  under the compiled path.

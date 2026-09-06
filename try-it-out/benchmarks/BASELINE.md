@@ -213,6 +213,47 @@ src/base/ftglyph.c` etc. appear in the build log), and examples 05/06
 rebuild to byte-identical output, confirming no regression to the
 existing, unaffected call path.
 
+## Compiled-shim (`dyndrv-shim`) re-measurement: BLOCKED in this environment (2026-09-06)
+
+Task: re-run `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
+against the new `toNodeCompiled`/`dyndrvShim` path (see `docs/
+rust-status.md`'s own "cc's decision logic ... ported and verified"
+section — the compiled path was verified CORRECT against examples
+05/06/07, including a full real freetype compile+link) and update the
+numbers above.
+
+**Could not complete**: both the EXISTING bash-path accelerated variant
+and the new compiled-path variant hang/fail identically on this
+machine's current local, single-user store setup
+(`build-users-group = ""`, no dedicated build user) — `phases.split`'s
+phase 2 `installPhase` fails at the exact same point on both paths:
+```
+mkdir: cannot create directory '/nonexistent': Permission denied
+make: *** [.../install.mk:39: install] Error 1
+```
+Confirmed genuinely environmental, not a regression from the compiled
+path: re-ran the UNMODIFIED bash-path benchmark script standalone (no
+`dyndrvShim` involved at all) and it fails identically at the same
+`mkdir /nonexistent` line. `phases.split`'s own `out = "/nonexistent"`
+override (see that file's header comment) apparently depends on a
+sandbox/build-user configuration this machine's CURRENT local-store
+setup no longer provides — `/nonexistent` is a real, root-owned
+absolute path outside the sandbox's writable set; under a genuine
+multi-user Nix daemon build with a dedicated build user, the sandbox's
+own private mount namespace makes it writable, but that mapping isn't
+present here. This is unrelated to whatever configuration produced this
+file's own `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
+numbers above (2026-09-05) — those completed successfully on this same
+machine only one day earlier, so something about the ambient
+environment (not this codebase) shifted in between.
+
+Both examples 05 and 06 (which don't need `phases.split`'s
+sandboxed/replay tree-restore step at all — `installPhase` for those
+runs straightforward `cp`) build and run correctly end-to-end under the
+compiled path, confirming the shim itself is not the blocker. Re-attempt
+this benchmark once the environment's sandbox/build-user setup is
+restored to whatever state let it succeed on 2026-09-05.
+
 ### Historical: bugs found building the real-package benchmark under the earlier `recursive-nix` architecture
 
 The section below (six bugs, `-MF` misclassification through internal
