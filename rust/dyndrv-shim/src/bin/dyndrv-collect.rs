@@ -188,8 +188,16 @@ fn main() -> anyhow::Result<()> {
 
     let coreutils_bin = std::env::var("DYNDRV_COREUTILS_BIN")
         .context("DYNDRV_COREUTILS_BIN (absolute path to coreutils' bin dir)")?;
+    // `StorePath`'s own `Display`/`to_base_path()` prints just
+    // `<hash>-<name>` (see `wrapper.rs::rewrite_argv_element`'s own
+    // identical note) -- the full absolute path must be reconstructed
+    // explicitly, or the rendered `cp -r` here resolves against the
+    // CALLING derivation's own relative cwd instead of the real store
+    // path (confirmed by direct reproduction against a real freetype
+    // build: "cp: cannot stat '<hash>-dyndrv-orig-tree/.': No such file
+    // or directory").
     let mut final_copy_lines = format!(
-        "{cu}/mkdir -p $out; {cu}/cp -r {tree}/. $out/; {cu}/chmod -R u+w $out; ",
+        "{cu}/mkdir -p $out; {cu}/cp -r /nix/store/{tree}/. $out/; {cu}/chmod -R u+w $out; ",
         cu = coreutils_bin,
         tree = orig_tree_path.to_base_path(),
     );

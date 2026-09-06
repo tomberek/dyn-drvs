@@ -95,11 +95,24 @@
   # through a separately-fetched `builder-rpc-v0`-capable Nix (e.g.
   # `try-it-out/patched-nix.nix`) that differs from `pkgs.nix`.
   nixPackage ? pkgs.nix,
+  # The compiled `rust/dyndrv-shim` package (providing `bin/dyndrv-shim`)
+  # to use for `cc`/`ar`/`ranlib` instead of the bash `toNode`/
+  # `toNodeBash` path, via `shim.wrapCommand`'s `toNodeCompiled` mode --
+  # collapses every intercepted invocation to one process, using the raw
+  # daemon-RPC client instead of `nix-instantiate`/`jq`/`nix` CLI spawns.
+  # Verified byte-identical against the bash path for `ar`/`ranlib`
+  # (see `rust/dyndrv-shim/ar-integration-test.nix`); `cc`'s own decision
+  # logic (`rust/dyndrv-shim/src/cc.rs`) is a direct port of `ccToNodeBash`
+  # below, kept byte-identical including its own bash sentinel-arithmetic
+  # quirks (see that file's own comments). Defaults to `null` (bash path,
+  # unchanged behavior) -- opt in explicitly per call site.
+  dyndrvShim ? null,
 }:
 
 assert builtins.elem granularity [ "file" "module" "package" ];
 
 let
+  useCompiledShim = dyndrvShim != null;
   realCc = "${stdenv.cc}/bin/cc";
   # The real `ar`/`ranlib` binaries live under `stdenv.cc.bintools.bintools`,
   # not `stdenv.cc` -- a different nixpkgs wrapper package. That package's
@@ -662,6 +675,19 @@ let
     command = "cc";
     realCommand = realCc;
     toNodeBash = ccToNodeBash;
+    toNodeCompiled = if useCompiledShim then dyndrvShim else null;
+    # `DYNDRV_BATCH_GROUPS` is NOT set here -- it's already ambient at
+    # runtime, set directly on the sandboxed derivation's own env (see
+    # `mkDerivation`'s `sandboxed` attrset below, `granularity ==
+    # "module"` branch), inherited by every child process including
+    # this compiled binary when it runs `cc`. `rust/dyndrv-shim/src/
+    # cc.rs`'s own `cc_to_node` reads it the same way `toNode`'s
+    # `builtins.getEnv "DYNDRV_BATCH_GROUPS"` does.
+    compiledEnv = lib.optionalAttrs useCompiledShim {
+      DYNDRV_REAL_COMMAND = realCc;
+      DYNDRV_COREUTILS_BASENAME = builtins.baseNameOf "${pkgs.coreutils}";
+      DYNDRV_STDENV_CC_BASENAME = builtins.baseNameOf "${stdenv.cc}";
+    };
     inherit toNode discoverTree nixPackage;
   };
 
@@ -669,6 +695,11 @@ let
     command = "ar";
     realCommand = realAr;
     toNode = arToNode;
+    toNodeCompiled = if useCompiledShim then dyndrvShim else null;
+    compiledEnv = lib.optionalAttrs useCompiledShim {
+      DYNDRV_REAL_COMMAND = realAr;
+      DYNDRV_BINTOOLS_BASENAME = builtins.baseNameOf "${stdenv.cc.bintools.bintools}";
+    };
     inherit nixPackage;
   };
 
@@ -721,6 +752,11 @@ let
     command = "ranlib";
     realCommand = realRanlib;
     toNode = ranlibToNode;
+    toNodeCompiled = if useCompiledShim then dyndrvShim else null;
+    compiledEnv = lib.optionalAttrs useCompiledShim {
+      DYNDRV_REAL_COMMAND = realRanlib;
+      DYNDRV_BINTOOLS_BASENAME = builtins.baseNameOf "${stdenv.cc.bintools.bintools}";
+    };
     inherit nixPackage;
   };
 
@@ -842,7 +878,7 @@ else
         args ? pname && args ? version
         || throw "dyndrv.accelerate.mkAcceleratedStdenv: mkDerivation call must set pname/version (phases.split needs both to name phase 1's own inner derivation) -- name-only calls aren't supported yet";
       self.phases.split {
-        inherit stdenv nixPackage;
+        inherit stdenv nixPackage dyndrvShim;
         inherit (args) pname version;
         sandboxed = args // {
           nativeBuildInputs = [ wrapperDir ] ++ (args.nativeBuildInputs or [ ]);

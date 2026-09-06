@@ -32,13 +32,27 @@ pub enum Decision {
 fn extra_store_paths(argv: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for a in argv {
-        if let Some(rest) = a.strip_prefix("/nix/store/") {
-            if let Some(basename) = rest.split('/').next() {
-                let basename = basename.to_string();
-                if !out.contains(&basename) {
-                    out.push(basename);
-                }
+        // Scans for "/nix/store/" ANYWHERE in the element, not just as a
+        // whole-element prefix -- a real argv element can GLUE a store
+        // path onto a flag with no space (e.g. `-I/nix/store/...-bzip2-
+        // .../include`, confirmed necessary by direct reproduction
+        // against a real freetype build: an `.strip_prefix`-only scan
+        // missed exactly this, leaving `bzip2-...-dev` out of `srcs` and
+        // the eventual compile failing with "bzlib.h: No such file or
+        // directory"). Matches the bash oracle's own `grep -o "/nix/
+        // store/[^/\"']*"` and `toNode`'s own `builtins.match
+        // ".*(...)."` -- both substring scans, not prefix checks.
+        let mut rest = a.as_str();
+        while let Some(idx) = rest.find("/nix/store/") {
+            let after = &rest[idx + "/nix/store/".len()..];
+            let basename: String = after
+                .chars()
+                .take_while(|&c| c != '/' && c != '"' && c != '\'')
+                .collect();
+            if !basename.is_empty() && !out.contains(&basename) {
+                out.push(basename.clone());
             }
+            rest = &after[basename.len()..];
         }
     }
     out

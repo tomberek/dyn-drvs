@@ -167,12 +167,14 @@
 #   plain env var works under any POSIX `/bin/sh`.
 #   `compiledEnv`: extra env vars (name -> value strings) the binary's own
 #   decision logic needs (e.g. `DYNDRV_REAL_COMMAND`/
-#   `DYNDRV_BINTOOLS_BASENAME` for `ar`/`ranlib`) -- exported before the
-#   exec. `discoverTree` has no effect when `toNodeCompiled` is set (the
-#   binary does its own header discovery natively, when a tool needs it);
-#   passing both is not yet supported (`cc`'s compiled decision logic,
-#   which needs discoverTree-equivalent behavior, is later work -- see
-#   `docs/rust-status.md`).
+#   `DYNDRV_BINTOOLS_BASENAME` for `ar`/`ranlib`, `DYNDRV_COREUTILS_BASENAME`/
+#   `DYNDRV_STDENV_CC_BASENAME`/`DYNDRV_BATCH_GROUPS` for `cc`) -- exported
+#   before the exec. `discoverTree` (the Nix-level PARAMETER) has no
+#   effect when `toNodeCompiled` is set -- the binary decides internally,
+#   based on `DYNDRV_TOOL`, whether to run the plain or discoverTree-
+#   equivalent pipeline (`rust/dyndrv-shim/src/cc.rs`'s own
+#   `discover_tree`/`cc_to_node`, invoked via `wrapper::run_discover_tree`
+#   for `cc` specifically) -- so passing both is harmless, just redundant.
 #
 {
   command,

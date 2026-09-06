@@ -118,9 +118,18 @@
     "fixupPhase"
   ],
   nixPackage ? pkgs.nix,
+  # The compiled `rust/dyndrv-shim` package (providing `bin/dyndrv-collect`),
+  # to use for the end-of-`buildPhase` collection pass instead of the bash
+  # `shim.collectStubs` -- verified byte-identical against the bash
+  # collector for the same input (see `rust/dyndrv-shim/collect-
+  # integration-test.nix`). Defaults to `null` (bash path, unchanged
+  # behavior).
+  dyndrvShim ? null,
 }:
 
 let
+  useCompiledCollect = dyndrvShim != null;
+
   # The submitted (inner) node's own name must match phase 1's OUTER
   # derivation's name exactly -- but `nix store submit-output` submits
   # the `.drv` FILE ITSELF as the content (same mechanism `viaDerivationAdd
@@ -138,7 +147,14 @@ let
   name = "${pname}-${version}.drv";
   innerName = "${pname}-${version}";
 
-  collectScript = (self.shim.collectStubs { name = innerName; inherit nixPackage; }).collectScript;
+  collectScript =
+    if useCompiledCollect then
+      ''
+        export DYNDRV_COREUTILS_BIN="${pkgs.coreutils}/bin"
+        "${dyndrvShim}/bin/dyndrv-collect" . ${lib.escapeShellArg innerName}
+      ''
+    else
+      (self.shim.collectStubs { name = innerName; inherit nixPackage; }).collectScript;
 
   # Phase 1: real unpack/patch/configure/build (unmodified, whatever the
   # caller supplied), gated on `builder-rpc-v0`, ending in a synthesized

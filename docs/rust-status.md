@@ -106,11 +106,85 @@ Net effect: `Drv` format's write path IS still fully daemon-free (as
 designed); only ITS OWN realization path needed one small daemon
 round-trip (`--add`) that the original plan didn't anticipate.
 
+## `cc`'s decision logic + `discoverTree`, ported and verified against
+## real freetype (task #67)
+
+`cc.rs`'s `cc_to_node`/`discover_tree` is a byte-exact port of
+`ccToNodeBash`/`mkAcceleratedStdenv.nix`'s `discoverTree` bash script,
+including the deliberately-preserved `-1`-sentinel arithmetic asymmetry
+(see that file's own module comment). Wired into `wrapCommand.nix`
+(`toNodeCompiled`), `mkAcceleratedStdenv.nix` (all three shims), and
+`phases/split.nix` (`dyndrv-collect` for the sandboxed collection tail)
+behind a `dyndrvShim` param, default `null` (unchanged bash path).
+
+Verified against three fixtures of increasing complexity — 05
+(toy 3-file program), 06 (`granularity = "module"` batching), and 07
+(real, unmodified `pkgs.freetype`, ~45 translation units, real
+cross-package `-I`/`-L` inputs, libtool-driven link with a generated
+version-script) — each built via
+`try-it-out/examples/0N-*-compiled.nix` copies passing `dyndrvShim`
+through. All three now build and run correctly (05/06's `prog`
+binaries produce their documented expected output; 07's full compile
++link pipeline reaches the exact same point bash-path 07 does, failing
+identically on an unrelated environmental `/nonexistent` permission
+issue present in both paths — not a regression, confirmed by running
+both side by side and diffing their tails byte-for-byte).
+
+Four real bugs found and fixed during this verification pass (none
+caught by the smaller `ar`/`ranlib` fixtures — only surfaced once a
+real multi-directory, multi-library package exercised `discoverTree`'s
+full path):
+
+- **Absolute discovered paths corrupted the staged tree.**
+  `run_discover_tree`'s `all_paths` list included `cc -M -MG`'s raw
+  output unfiltered — an absolute system-header path (e.g. glibc's
+  `stdio.h`) reached `stage_tree`, where Rust's `PathBuf::join` on an
+  absolute argument REPLACES the whole destination rather than
+  nesting it, so `fs::copy` tried to copy a read-only store file onto
+  itself (`Permission denied`). Fixed by filtering `discovered` for
+  absolute paths before staging, matching the bash oracle's own
+  `case "$p" in /*) continue;; esac`.
+- **`extra_store_paths` (both `cc.rs` and `tonode.rs`) used
+  `str::strip_prefix`, a whole-element check, not a substring scan.**
+  A real argv element routinely GLUES a store path onto a flag with no
+  space (`-I/nix/store/...-bzip2-1.0.8-dev/include`) — confirmed
+  necessary by direct reproduction against real freetype:
+  `ftbzip2.c`'s compile failed with `bzlib.h: No such file or
+  directory` because `bzip2-...-dev` never made it into the
+  derivation's own `srcs`. Fixed to scan for `/nix/store/` ANYWHERE in
+  the element, matching the bash oracle's `grep -o "/nix/store/[^/\"']*"`
+  and `toNode`'s own `builtins.match ".*(...)."`.
+- **`run_discover_tree` never ported the `-Wl,*`-glued-path case.**
+  libtool generates `objs/.libs/libfreetype.ver` via plain shell
+  redirection (not `cc`/`ar`), then references it as
+  `-Wl,-version-script,objs/.libs/libfreetype.ver` — invisible to the
+  positional scan since `-Wl,...` is `-`-prefixed. Missing this staged
+  an incomplete tree, and the LINK step failed
+  (`ld.bfd: cannot open linker script file`). Ported
+  `wrapCommand.nix`'s own comma-token walk. The positional scan was
+  also missing the stub-exclusion guard (`dyndrv_read_batch_stub`) the
+  bash oracle has — a link step's own `.o` positional args can be
+  OTHER pending stubs, which must stay as literal argv text, not get
+  staged as real (placeholder) file content.
+- **`dyndrv-collect`'s final tree-assembly script referenced
+  `orig_tree_path.to_base_path()` bare**, missing the `/nix/store/`
+  prefix (same `StorePath::Display` gotcha `wrapper.rs::
+  rewrite_argv_element` already had its own comment about) — the
+  generated `cp -r <basename>/. $out/` resolved against the CALLING
+  derivation's own relative cwd instead of the real store path
+  (`cp: cannot stat '<hash>-dyndrv-orig-tree/.': No such file or
+  directory`). Fixed by reconstructing the absolute path explicitly.
+
+All four were caught by direct reproduction against increasingly real
+fixtures, not designed around in advance — consistent with this
+project's own established discipline: the smaller `ar`/`ranlib`
+fixtures (05/06, plus the standalone integration tests) stayed green
+throughout, since none of them exercise `discoverTree`'s absolute-path
+filtering, glued-flag store-path scanning, or `-Wl,`-referenced
+generated files at all.
+
 ## What's still follow-on work
 
-- `cc`'s own decision logic (bigger than `ar`/`ranlib` — needs
-  `discoverTree`-equivalent header discovery, probe detection) is not
-  yet ported to `dyndrv-shim`; only `ar`/`ranlib` are.
 - `Thunk { format: Drv }`'s multi-node graph case (real `inputDrvs`
   chaining across several dyndrv-produced `.drv` files) is unbuilt —
   only verified against a single-node fixture.
