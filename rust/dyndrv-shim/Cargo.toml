@@ -1,0 +1,26 @@
+[package]
+name = "dyndrv-shim"
+version = "0.1.0"
+edition = "2021"
+
+# `nix-builder-rpc-client` is vendored at ../vendor/nix-builder-rpc-client
+# (pinned to nix-ninja commit 9a07e67, with one local addition --
+# `add_to_store_flat`, needed for byte-identical parity with `nix store
+# add-file`'s own default Flat CA method, which upstream never needed).
+# `harmonia-*` is vendored at ../vendor/harmonia, pinned to the exact
+# commit (b7c7777) nix-ninja's OWN committed Cargo.lock records for that
+# rev -- harmonia's `main` HEAD has since diverged incompatibly
+# (confirmed directly: HEAD's `print_derivation_aterm` signature no
+# longer matches what this pinned nix-builder-rpc-client rev expects).
+# See docs/rust-status.md for the full "why vendor, not a git dep" story.
+[dependencies]
+nix-builder-rpc-client = { path = "../vendor/nix-builder-rpc-client" }
+harmonia-store-derivation = { path = "../vendor/harmonia/harmonia-store-derivation" }
+harmonia-store-path = { path = "../vendor/harmonia/harmonia-store-path" }
+harmonia-store-content-address = { path = "../vendor/harmonia/harmonia-store-content-address" }
+harmonia-utils-hash = { path = "../vendor/harmonia/harmonia-utils-hash" }
+anyhow = "1.0"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
