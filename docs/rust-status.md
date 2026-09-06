@@ -263,6 +263,46 @@ linking against both the object and the archive, and running the
 result — all through the compiled shim, with `DYNDRV_AUTOFORCE=1` so
 every step realizes immediately.
 
+## Spike finding: freshly-`add_drv_to_store`d paths are NOT sandbox-
+## visible (task #83)
+
+Investigated switching `Sandbox` mode's own intermediate representation
+from a text-based batch-pending stub to a real symlink pointing
+straight at a `.drv`'s own store path (see `docs/drv-thunk-multinode-
+design.md`'s sibling design doc for the full "symlink-based IR" plan
+this answers a prerequisite question for). The open question: does a
+store path registered via `add_drv_to_store` MID-BUILD become
+filesystem-visible (`stat`/`readlink -f`) inside the SAME sandboxed
+builder that just registered it, or is `builder-rpc-v0`'s sandbox only
+ever bind-mounted with the DECLARED input closure known before the
+build started?
+
+**Confirmed by direct reproduction: NOT visible.** A throwaway spike
+binary (`sandbox-visibility-spike.rs`, built and run once, then
+deleted — not a kept fixture) registered a brand-new, never-before-seen
+derivation via `add_drv_to_store` inside a real `builder-rpc-v0`
+sandbox, then immediately checked the resulting path both directly
+(`std::fs::symlink_metadata`) and through a freshly-created symlink to
+it. Both checks failed identically: `No such file or directory (os
+error 2)`. The daemon accepts and returns a real, valid `StorePath` for
+the registration itself (confirmed: `add_drv_to_store` succeeded, the
+path just isn't locally statable) — this is purely a sandbox
+mount-namespace limitation, not a registration failure.
+
+**Consequence**: any design that wants to detect "is this on-disk path
+actually a resolved dependency, and if so what's its real identity"
+from WITHIN a `Sandbox`-mode build cannot use a plain filesystem check
+for anything registered live, mid-build (unlike `Thunk` mode's `.nix`/
+`.drv` thunk files, which ARE real local files and stay `stat`-able).
+It needs a daemon `IsValidPath` round-trip instead — the primitive
+already exists one layer down in `harmonia-store-remote` (confirmed
+present in the vendored crate) but is not yet wrapped by `nix-builder-
+rpc-client`'s own public API, so using it would mean adding that
+wrapper first. This is exactly the "Design B" branch of the symlink-IR
+plan; any eager-registration redesign of `Sandbox` mode's file- or
+module-granularity paths must budget for this daemon round-trip's
+latency, not assume a free local `stat`.
+
 ## What's still follow-on work
 
 - `Thunk { format: Drv }`'s multi-node graph case (real `inputDrvs`
