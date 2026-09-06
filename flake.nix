@@ -37,7 +37,11 @@
       );
 
       devShells = forAllSystems (system: {
-        default =
+        # `nix develop .#nixgg` (previously `.#default`): the original
+        # nixgg-style shell, no compiled shim wrappers at all -- just a
+        # patched Nix pointed at an alt local store. Kept under its own
+        # name for anyone who still wants exactly this, unshimmed.
+        nixgg =
           let
             pkgs = nixpkgs.legacyPackages.${system};
           in
@@ -62,15 +66,16 @@
             '';
           };
 
-        # `nix develop .#dyndrv-shim`: a real `cc`/`ar`/`ranlib` toolchain
-        # backed by the compiled `rust/dyndrv-shim` binary (see
-        # `nix/lib/shim/devShell.nix`'s own header comment) -- registers
-        # (and, with `DYNDRV_AUTOFORCE=1`, realizes) real derivations for
-        # every compile/archive step run in this shell, over an ordinary
-        # UNRESTRICTED daemon connection (`Rpc` mode, auto-detected: no
-        # `builder-rpc-v0` sandbox env vars present outside a real
-        # sandboxed build). Verified end-to-end (compile, archive,
-        # ranlib-index, link, run) against a real two-file C program.
+        # `nix develop` (default) / `nix develop .#dyndrv-shim`: a real
+        # `cc`/`ar`/`ranlib` toolchain backed by the compiled `rust/
+        # dyndrv-shim` binary (see `nix/lib/shim/devShell.nix`'s own
+        # header comment) -- registers (and, with `DYNDRV_AUTOFORCE=1`,
+        # realizes) real derivations for every compile/archive step run
+        # in this shell, over an ordinary UNRESTRICTED daemon connection
+        # (`Rpc` mode, auto-detected: no `builder-rpc-v0` sandbox env
+        # vars present outside a real sandboxed build). Verified
+        # end-to-end (compile, archive, ranlib-index, link, run) against
+        # a real two-file C program.
         dyndrv-shim =
           let
             pkgs = nixpkgs.legacyPackages.${system};
@@ -91,6 +96,8 @@
             ];
             shellHook = shim.shellHook;
           };
+
+        default = self.devShells.${system}.dyndrv-shim;
       });
     };
 }
