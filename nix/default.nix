@@ -34,8 +34,12 @@ let
 
     shim = {
       wrapCommand = callLib ./lib/shim/wrapCommand.nix;
-      wrapArchiver = callLib ./lib/shim/wrapArchiver.nix;
+      collectStubs = callLib ./lib/shim/collectStubs.nix;
       batchStub = callLib ./lib/shim/batchStub.nix;
+    };
+
+    phases = {
+      split = callLib ./lib/phases/split.nix;
     };
 
     accelerate = {

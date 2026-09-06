@@ -46,9 +46,10 @@ per-derivation registration overhead dominates) — the whole point of this
 benchmark shipping in the repo is that you can run it yourself and see
 both sides, not just take a README's word for it.
 
-No patched Nix required for this one — `mkAcceleratedStdenv` only needs
-`recursive-nix`, which works on stock, released Nix (Determinate Nix
-2.34.6/mainline 2.24+).
+No patched Nix required for this one, but it does need `builder-rpc-v0` --
+run it via `try-it-out/run-nix.sh`, which fetches a real, unpatched
+NixOS/nix commit that supports it (see that script's own header comment;
+no separate patched fork or meson build step needed).
 
 ## Status
 
@@ -62,10 +63,13 @@ and the plan doc referenced in git history for full findings.
   `recursive-nix` fallback via `viaNixInstantiate`).
 - **v0.2**: `graph.compile` (whole dependency-graph compilation into one
   outer submission, `builder-rpc-v0` backend), `shim.wrapCommand`
-  ($PATH-command interception, `recursive-nix` backend), and
-  `accelerate.mkAcceleratedStdenv` (the one-line accelerator built on
-  both — the main adoption lever), plus the `registration-overhead.sh`
-  and `small-lib-patch-rebuild.sh` benchmarks.
+  ($PATH-command interception, defer-only, `builder-rpc-v0` backend),
+  `shim.collectStubs` (resolves a whole build tree's deferred stubs into
+  one registered graph, submitting a fully-resolved tree),
+  `phases.split` (the general sandboxed/replay two-derivation primitive),
+  and `accelerate.mkAcceleratedStdenv` (the one-line accelerator built on
+  all of the above — the main adoption lever), plus the
+  `registration-overhead.sh` and `small-lib-patch-rebuild.sh` benchmarks.
 
 ## Layout
 
@@ -75,8 +79,10 @@ nix/lib/             Core Nix-expression library (the load-bearing part —
 nix/lib/builders/     Backend-specific single-node builder-script generators
 nix/lib/graph/        Whole-dependency-graph compiler (graph.compile) and
                       its toOutput strategies (assemble, selectSink)
-nix/lib/shim/         $PATH-command interception primitive (wrapCommand)
-nix/lib/accelerate/   The one-line stdenv accelerator, built on shim/
+nix/lib/shim/         $PATH-command interception (wrapCommand) and whole-
+                      build-tree stub resolution (collectStubs)
+nix/lib/phases/       The sandboxed/replay two-derivation split (split.nix)
+nix/lib/accelerate/   The one-line stdenv accelerator, built on shim/+phases/
 nix/tests/            dyndrv's own tests, cross-checked against Nix's oracle
 tests/oracle/         Vendored reference copies of Nix core's own
                       tests/functional/dyn-drv/ test cases
@@ -99,11 +105,17 @@ myPackage.override {
 ```
 
 Run `try-it-out/examples/05-accelerate-stdenv.nix` for a minimal, runnable
-demo end to end, `try-it-out/examples/04-wrap-command.nix` for the
-underlying `shim.wrapCommand` mechanism it's built from, or
+demo end to end (via `try-it-out/run-nix.sh`, since phase 1 needs
+`builder-rpc-v0`), or `try-it-out/examples/07-accelerate-real-package.nix`
+for the same one-line change applied to real, unmodified nixpkgs
+`freetype` — including a second `patchOutput` attribute in that same file
+showing a one-line source patch (the same idiom as a real version bump)
+correctly triggering just a couple of fresh per-file rebuilds instead of
+recompiling the whole package. See
 `try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
-`real-package-patch-rebuild.sh` for the accelerator applied to real
-multi-file builds (synthetic and real-nixpkgs, respectively).
+`real-package-patch-rebuild.sh`/`real-package-version-bump.sh` for the
+accelerator's numbers on synthetic, single-file-real-package, and
+multi-file-real-package (version-bump-shaped) workloads respectively.
 
 **Want to build a lang2nix-style tool, or a dependency-graph compiler
 (gradle-drvs'/sandstone's use case)?** The **`builder-rpc-v0` backend is
@@ -149,9 +161,10 @@ dyndrv.mkDynamicDerivation {
 | `dyndrv.graph.compile` | Compiles a whole dependency graph (many nodes, each possibly depending on other nodes' not-yet-built outputs) into ONE outer submission — `builder-rpc-v0` backend. Optional per-node `group` field merges every node sharing the same `group` string into ONE registered derivation (one `nix derivation add` call, one distinctly-named output per member) instead of one call per node — the one mechanism this library provides for consolidating a fine-grained graph into coarser sub-components; nodes that never set `group` are byte-for-byte unaffected. See `try-it-out/examples/03-graph-with-groups.nix`. |
 | `dyndrv.graph.assemble` / `.selectSink` | The two `toOutput` strategies `graph.compile` supports: merge every node's output into one tree, or return one named "sink" node's output directly. |
 | `dyndrv.graph.groupByDirectory` | Canned `group`-assignment helper: given a flat node set and a function extracting each node's own path, sets `group` to that path's directory — sugar over `graph.compile`'s `group` field, not a second grouping mechanism. See `try-it-out/examples/03-graph-groupby-directory.nix`. |
-| `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so each invocation either registers itself as its own dynamically-produced, immediately-realized derivation (`materialize`, the default), or defers to a batch-pending stub resolved later by `shim.wrapArchiver` (`defer`) — decided per-invocation by the caller-supplied `toNode`'s own return shape, so one shim instance can mix both. `recursive-nix` backend. What `accelerate.mkAcceleratedStdenv` is built from. |
-| `dyndrv.shim.wrapArchiver` | The `ar`-collection companion to `wrapCommand`'s `defer` mode: combines every same-batch-group deferred stub into ONE registered, realized derivation (compile + archive together) instead of one call per member; falls back to resolving mixed/foreign inputs individually so nothing is left dangling. Ported from nixgg's own proven `batch`/`batchpending`/`batcharchive` design. |
-| `dyndrv.accelerate.mkAcceleratedStdenv` | The lowest-friction entry point in the library: `{ stdenv }: stdenv`, for overriding an existing package's `stdenv` (`myPkg.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }`). Ordinary `cc -c` compiles become independent, per-translation-unit cacheable derivations. `granularity = "file"` (default), `"module"` (opt-in `ar`-batched compiles per directory via a required `shouldBatch : relativePath -> bool` predicate — see `try-it-out/examples/06-accelerate-stdenv-module.nix`), or `"package"` (no-op escape hatch). |
+| `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so every invocation defers -- writes a batch-pending stub instead of running, and returns instantly (there is no live "materialize inline" mode: `builder-rpc-v0` cannot realize a derivation from inside a running script). `builder-rpc-v0` backend. What `accelerate.mkAcceleratedStdenv` is built from. |
+| `dyndrv.shim.collectStubs` | Runs ONCE at the end of a real build (after the build tool has finished against a tree full of deferred stubs): walks the whole tree, reconstructs the full dependency graph from each stub's own record, registers one derivation per unit (auto-merging same-group members, mirroring `graph.compile`'s own topological/placeholder-wiring algorithm ported to bash), and submits a fully-resolved tree. |
+| `dyndrv.phases.split` | The general "sandboxed, then replay" two-derivation primitive (nixgg's own `dynDrvStdenv` phase1/phase2 pattern): phase 1 runs the real build (gated on `builder-rpc-v0`) ending in a `collectStubs` pass; phase 2 is an ORDINARY derivation that runs `installPhase`/`fixupPhase` against phase 1's now-resolved tree, with no special capability needed at all (real multi-output support works here). What `accelerate.mkAcceleratedStdenv` is built on. |
+| `dyndrv.accelerate.mkAcceleratedStdenv` | The lowest-friction entry point in the library: `{ stdenv }: stdenv`, for overriding an existing package's `stdenv` (`myPkg.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }`). Ordinary `cc`/`ar` invocations become independent, per-translation-unit cacheable derivations. `granularity = "file"` (default), `"module"` (opt-in directory-batched compiles via a required `shouldBatch : relativePath -> bool` predicate — see `try-it-out/examples/06-accelerate-stdenv-module.nix`), or `"package"` (no-op escape hatch). `builder-rpc-v0` backend throughout. The returned derivation's own `overrideAttrs` correctly re-runs the WHOLE two-phase build (not just install/fixup) — patches/`configureFlags`/`buildPhase` overrides all take effect, exactly like an ordinary `stdenv.mkDerivation` package. See `try-it-out/examples/07-accelerate-real-package.nix` for this applied to a real, unmodified nixpkgs package. |
 
 ### The producer contract
 
@@ -197,7 +210,8 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
 ```console
 $ ./try-it-out/benchmarks/registration-overhead.sh          # metric 3: the per-call "tax"
 $ ./try-it-out/benchmarks/small-lib-patch-rebuild.sh         # metrics 1/2/4: synthetic fixture, real win (and honest loss case)
-$ ./try-it-out/benchmarks/real-package-patch-rebuild.sh      # same metrics against real, unmodified nixpkgs freetype
+$ ./try-it-out/benchmarks/real-package-patch-rebuild.sh      # same metrics against real, unmodified nixpkgs freetype, one file patched
+$ ./try-it-out/benchmarks/real-package-version-bump.sh       # same, but a 3-file patch across 2 subdirectories -- shaped like a real version bump's diff
 ```
 
 See `try-it-out/benchmarks/BASELINE.md` for the last-known numbers, kept
@@ -208,28 +222,24 @@ the tradeoff does *not* favor `dyndrv` too (it's documented, not hidden).
 
 ## Known limitations
 
-- **`accelerate.mkAcceleratedStdenv`'s `granularity = "module"` batches
-  `ar`-collected object files, but not the linker** — `granularity =
-  "module"` (2026-09-04) shims `ar` in addition to `cc`, batching every
-  opted-in (`shouldBatch`) source's compile into one combined derivation
-  per archive; the final link step still passes through unaccelerated
-  (comparatively cheap, rarely dominates a real rebuild). A batched
-  member's staged tree merging (see `mkAcceleratedStdenv.nix`'s header
-  comment) has one documented, unguarded gap: two DIFFERENT batched
-  members staging DIFFERENT content at the SAME relative path silently
-  keep whichever ran last, with no detection or error.
+- **`accelerate.mkAcceleratedStdenv`'s `granularity = "module"`'s batched
+  member staging has one documented, unguarded gap**: two DIFFERENT
+  batched members staging DIFFERENT content at the SAME relative path
+  silently keep whichever ran last, with no detection or error.
 - **Packages that bake their own not-yet-known `$out` path into every
   compile flag (openssl's `-DOPENSSLDIR=`/`-DENGINESDIR=`/`-DMODULESDIR=`
-  being the confirmed example) cannot demonstrate per-TU caching on a
-  patch** — since `$out` changes whenever the outer derivation's own
-  attributes change, EVERY per-TU derivation's hash changes too, for a
-  reason that has nothing to do with which file was actually edited. This
-  is a structural property of those packages' own build systems, not a
-  dyndrv bug — nixgg's own real fix needs `builder-rpc-v0` + an
-  `out = "/nonexistent"` sandboxed phase + a separate restore/patchelf
-  phase (`phases.split`), genuinely v0.3 scope. See
-  `try-it-out/benchmarks/BASELINE.md` for the full finding and why
-  `real-package-patch-rebuild.sh` uses freetype instead.
+  being the confirmed example) may now be able to demonstrate per-TU
+  caching correctly, unverified** — this was a structural limitation
+  under the earlier `recursive-nix`-based design (a live shim's own
+  `$out` was the OUTER derivation's real, already-known path, which
+  changes whenever ANY outer attribute changes). Under the current
+  `phases.split`-based design, `$out` inside phase 1's own compile
+  commands is a per-UNIT placeholder (`builtins.placeholder`-style, a
+  function of that unit's own content only) — not the final package's
+  real `$out`, which is only computed in phase 2. Whether this actually
+  resolves the openssl case end to end has NOT been directly verified
+  yet against a real build; flagging as a promising, plausible
+  consequence of the redesign rather than a confirmed fix.
 - **`graph.compile` only implements the `builder-rpc-v0` backend** —
   `recursive-nix` multi-node graphs need their own single-composed-Nix-
   expression codegen (confirmed to work in principle; not yet built).

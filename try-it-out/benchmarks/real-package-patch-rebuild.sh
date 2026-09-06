@@ -19,23 +19,25 @@
 # generated build commands, and its actual multi-library dependency set,
 # not a fixture built specifically to exercise dyndrv favorably.
 #
-# HONEST RESULT, stated plainly (per the plan's mandate not to cherry-pick
-# only the favorable case): at freetype's real scale (~45 files, modest
-# per-file compile time), the accelerated patched rebuild is typically
-# SLOWER in wall-clock than the plain rebuild -- confirmed directly. The
-# per-derivation registration/realise tax (~50-80ms/call, see
-# registration-overhead.sh) dominates when there's this little compile
-# work per file, and `configure` reruns from scratch on every patch either
-# way (no ccache/autoconf-cache layer in either variant), adding a fixed
-# cost neither side avoids. What DOES improve, and improves a lot, is
-# metric 2 (derivations rebuilt): only the ONE patched file's compiles
-# (libtool compiles each source twice -- once static, once `-fPIC` for the
-# shared lib -- so 2 real per-TU derivations) plus the 2 unavoidable
-# configure-time conftest probes rebuild, vs. the plain build's single
-# derivation recompiling everything. This is the honest, real-package
-# confirmation of small-lib-patch-rebuild.sh's own documented break-even
-# finding: dyndrv's per-TU win is real and scales with per-file compile
-# cost, but is not automatically a wall-clock win on every package size.
+# Backend: `builder-rpc-v0` (via `patched-nix.nix`, matching
+# `small-lib-patch-rebuild.sh`'s own pattern) -- `mkAcceleratedStdenv` no
+# longer has a `recursive-nix` code path at all (see that file's own
+# header for why: `builder-rpc-v0` cannot realize a derivation from
+# inside a running script, so the whole accelerator was rebuilt on top of
+# `phases.split`'s sandboxed/replay two-derivation wiring instead).
+#
+# See BASELINE.md for the actual numbers -- this script's OWN historical
+# header comment used to assert a specific "accelerated is slower here"
+# result, measured under the earlier `recursive-nix`-backed architecture;
+# that result is not necessarily representative of the current
+# `builder-rpc-v0`/`phases.split` architecture (different registration
+# mechanism, different per-unit granularity, an added `phases.split`
+# restore step) and should not be assumed to hold without re-measuring.
+# The general SHAPE of the tradeoff this script exists to demonstrate
+# (metric 2, derivations-rebuilt, improves a lot; metric 1, wall-clock,
+# depends on per-file compile time vs. the registration tax) is still the
+# right thing to look for -- just verify the actual numbers in
+# BASELINE.md rather than trusting a stale inline claim.
 #
 # Usage:
 #   try-it-out/benchmarks/real-package-patch-rebuild.sh
@@ -48,6 +50,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DYNDRV_ROOT="$(dirname "$SCRIPT_DIR")"
 
 WORKDIR="${DYNDRV_BENCH_DIR:-$(mktemp -d -t dyndrv-real-pkg-bench.XXXXXX)}"
 mkdir -p "$WORKDIR"
@@ -56,7 +59,16 @@ if [[ -z "${KEEP:-}" ]]; then
 fi
 
 EXTRA_FEATURES="nix-command ca-derivations dynamic-derivations recursive-nix"
-SYSTEM_FEATURES="recursive-nix"
+SYSTEM_FEATURES="builder-rpc-v0"
+
+# Same version-matching requirement `small-lib-patch-rebuild.sh` already
+# documents: the Nix driving this build and the `nixPackage` passed
+# internally to `builder-rpc-v0` registration calls must be the SAME
+# fetched build. Resolved once here, exactly the way
+# `try-it-out/run-nix.sh`/`small-lib-patch-rebuild.sh` already do.
+DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths \
+  -f "$DYNDRV_ROOT/patched-nix.nix" '^out')
+NIX_BIN="$DYNDRV_NIX/bin/nix"
 
 echo "dyndrv real-package-patch-rebuild benchmark (nixpkgs freetype)"
 echo "workdir=$WORKDIR"
@@ -80,12 +92,13 @@ nix_build() {
   if [[ "$withPatch" = "1" ]]; then
     patchArgs=(--arg patch "$WORKDIR/patch.diff")
   fi
-  nix build \
+  "$NIX_BIN" build \
     --extra-experimental-features "$EXTRA_FEATURES" \
     --extra-system-features "$SYSTEM_FEATURES" \
     --store "local?root=$store" \
     --no-link --print-out-paths \
     --impure --argstr variant "$variant" \
+    --argstr nixPackagePath "$DYNDRV_NIX" \
     "${patchArgs[@]}" \
     -f "$SCRIPT_DIR/real-package-lib.nix"
 }
@@ -100,7 +113,14 @@ time_build() {
 }
 
 count_dyndrv_builds() {
-  grep -c "building '.*dyndrv-cc-.*\.drv'" "$WORKDIR/last-build.log" || true
+  # Counts distinct per-unit builder invocations `shim.collectStubs`
+  # registers -- a solo unit's own registered name is
+  # `dyndrv-<flattened-relative-path>` (e.g. `dyndrv-objs_ftglyph_o` for
+  # `objs/ftglyph.o`), a merged batch unit is `dyndrv-batch-<key>` --
+  # both start with `dyndrv-`, and nothing else this benchmark builds
+  # does (confirmed against a real freetype build log directly, matching
+  # `small-lib-patch-rebuild.sh`'s own identical pattern).
+  grep -c "building '.*dyndrv-.*\.drv'" "$WORKDIR/last-build.log" || true
 }
 
 echo "=== Plain stdenv.mkDerivation (real nixpkgs freetype) ==="
@@ -126,9 +146,11 @@ time_build "$WORKDIR/store-accelerated" "accelerated" 1
 acc_patch_time=$(cat "$WORKDIR/last-elapsed")
 acc_patch_rebuilt=$(count_dyndrv_builds)
 echo "  ${acc_patch_time}s"
-echo "  dynamic per-TU derivations rebuilt: $acc_patch_rebuilt (2 unavoidable configure-time"
-echo "  conftest probes + 2 real compiles of the patched file -- libtool compiles each"
-echo "  source twice, once static and once -fPIC for the shared lib)"
+echo "  dynamic per-TU derivations rebuilt: $acc_patch_rebuilt (only the patched file's own"
+echo "  compiles -- libtool compiles each source twice, once static and once -fPIC for the"
+echo "  shared lib, so 2 real per-TU derivations for one changed file; autoconf's own"
+echo "  configure-time probes are pure passthrough, never registered as dyndrv derivations"
+echo "  at all, so they don't inflate this count)"
 echo ""
 
 echo "=== Metric 1: rebuild wall-clock (patched, warm store) ==="
@@ -145,8 +167,8 @@ fi
 echo ""
 
 echo "=== Metric 2: derivations rebuilt vs. total (patched rebuild) ==="
-echo "  accelerated: $acc_patch_rebuilt dynamic derivations (only the changed file's compiles"
-echo "  + unavoidable configure probes)"
+echo "  accelerated: $acc_patch_rebuilt dynamic derivations (only the changed file's compiles --"
+echo "  configure-time probes are pure passthrough, never registered)"
 echo "  plain:       1 / 1 (the whole freetype derivation, unconditionally)"
 echo ""
 
@@ -155,7 +177,8 @@ echo "  Not re-measured here -- see try-it-out/benchmarks/registration-overhead.
 echo ""
 
 echo "=== Metric 4: break-even guidance ==="
-echo "  freetype's real per-file compile time is on the wrong side of break-even for THIS"
-echo "  machine's registration tax -- confirmed directly, and reported honestly (see script"
-echo "  header). Packages with heavier per-TU compile cost (see small-lib-patch-rebuild.sh's"
+echo "  Whether freetype's real per-file compile time lands past this machine's registration"
+echo "  tax is exactly what metric 1's speedup number above answers -- see BASELINE.md for"
+echo "  the last-recorded result. Packages with heavier per-TU compile cost (see"
+echo "  small-lib-patch-rebuild.sh's"
 echo "  LOOPS-scaled fixture for the exact shape of the tradeoff) cross into a real win."

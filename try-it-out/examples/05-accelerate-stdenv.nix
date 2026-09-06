@@ -5,28 +5,37 @@
 #
 # This example builds a tiny 3-file C program (main.c + two independent
 # "library" files) via a completely ordinary `stdenv.mkDerivation`,
-# `.override`d to use the accelerated `stdenv` -- each `cc -c` invocation
-# becomes its own dynamically-produced derivation via `shim.wrapCommand`,
-# and only the link step (and, on the first build, feature-probe-style
-# invocations, of which this simple Makefile has none) passes through
-# unaccelerated.
+# `.override`d to use the accelerated `stdenv` -- every `cc`/`ar`
+# invocation defers (writes a batch-pending stub instead of compiling),
+# `dyndrv.phases.split` runs `buildPhase` to completion almost instantly
+# against a tree full of stubs, then `shim.collectStubs` resolves the
+# whole discovered compile graph in one pass and submits a fully-resolved
+# tree for phase 2 (an ORDINARY derivation) to run `installPhase` against.
 #
-# `recursive-nix`-only (inherited from `shim.wrapCommand`/
-# `mkAcceleratedStdenv`'s own v0.2 scope) -- no patched Nix needed, unlike
-# examples 01/03. See `try-it-out/benchmarks/small-lib-patch-rebuild.sh`
-# and `real-package-patch-rebuild.sh` for the numbers this mechanism
-# actually produces (a real win at real per-file compile cost, an honest
-# loss at trivial compile cost -- see BASELINE.md).
+# `builder-rpc-v0`-only (phase 1's own requirement; phase 2 needs no
+# special capability at all) -- run via `try-it-out/run-nix.sh`, same as
+# examples 01/03.
+#
+# See `try-it-out/benchmarks/small-lib-patch-rebuild.sh` and
+# `real-package-patch-rebuild.sh` for the numbers this mechanism actually
+# produces.
 #
 # Run with:
-#   nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
-#     --extra-system-features recursive-nix --store 'local?root=/tmp/dyndrv-store' \
-#     -f try-it-out/examples/05-accelerate-stdenv.nix
+#   try-it-out/run-nix.sh build --impure --no-link -f try-it-out/examples/05-accelerate-stdenv.nix
 
 let
   pkgs = import <nixpkgs> { };
   lib = pkgs.lib;
   dyndrv = import ../../nix { inherit pkgs lib; };
+
+  # `mkAcceleratedStdenv`'s own `nixPackage` version-matching requirement
+  # (see that file's header): must be the SAME fetched Nix
+  # `try-it-out/run-nix.sh` uses to drive this build, not the ambient
+  # `pkgs.nix` -- confirmed necessary by direct reproduction: using
+  # `pkgs.nix` here fails with "Operation 19 not allowed inside
+  # derivation" (`SetOptions`, rejected by the newer daemon's stricter
+  # `builder-rpc-v0` connection allowlist).
+  patchedNix = import ../patched-nix.nix { };
 
   src = pkgs.runCommand "accelerate-example-src" { } ''
     mkdir -p $out
@@ -79,5 +88,5 @@ in
 # mechanics, and every real package (`pkgs.foo`, via `callPackage`)
 # already has it.
 plain.override {
-  stdenv = dyndrv.accelerate.mkAcceleratedStdenv { inherit (plain) stdenv; };
+  stdenv = dyndrv.accelerate.mkAcceleratedStdenv { inherit (plain) stdenv; nixPackage = patchedNix; };
 }

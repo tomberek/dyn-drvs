@@ -1,69 +1,45 @@
 { pkgs, lib, self }:
 
-# The narrow, single-output slice of nixgg's `dynDrvStdenv`: overrides
-# `stdenv.mkDerivation` so `cc` invocations with a `-c` flag (ordinary
-# translation-unit compiles) become per-file dynamically-produced
-# derivations via `shim.wrapCommand`, while everything else (linking,
-# `ar`, configure-time feature probes, etc.) runs completely normally --
-# deliberately scoped to skip multi-output placeholder handling and
-# rpath rewriting (deferred to v0.3's general `dynDrvStdenv`-equivalent)
-# so it's small enough to actually ship in v0.2.
+# The single-output C/C++ accelerator: overrides `stdenv.mkDerivation` so
+# every `cc -c`/link/`ar` invocation defers (see `shim/wrapCommand.nix`'s
+# header for why EVERY invocation defers now, unconditionally -- there is
+# no live "materialize inline" mode anymore, since `builder-rpc-v0`
+# structurally cannot realize a derivation from inside a running script).
+# `make`/whatever build tool runs to completion almost instantly against a
+# tree full of batch-pending stubs; `shim.collectStubs` then resolves the
+# whole discovered graph in one pass at the end of `buildPhase`, submitting
+# a fully-resolved build tree. `dyndrv.phases.split` (a general, separately
+# usable primitive) supplies the actual two-derivation wiring this needs:
+# phase 1 (gated on `builder-rpc-v0`) runs unpack/patch/configure/build
+# (deferred) plus the collection pass; phase 2 (an ORDINARY derivation, no
+# special capability needed) runs check/install/fixup against phase 1's
+# now-fully-resolved tree.
 #
 # This is the mechanism the adoption story is built around: point this at
 # an existing single-output C/C++ `stdenv.mkDerivation` package and get
 # per-translation-unit caching, one line changed, no rewrite required.
 #
-# HOW IT WORKS: `mkAcceleratedStdenv` wraps the toolchain's `cc` (only --
-# not `ar`/the linker, in this v0.2 scope) with `shim.wrapCommand`, whose
-# `toNode` parses the real invocation's argv:
-#   - if it has NO `-c` flag (a link invocation, or any other cc use that
-#     isn't a single-file compile) -> `toNode` returns `null`
-#     (PASSTHROUGH), and the wrapper execs the real `cc` unmodified.
-#   - if it DOES have `-c` -> `toNode` returns a `drvJson` describing "run
-#     the real `cc` with this exact argv, inside its own registered
-#     derivation" -- `wrapCommand` registers it, realizes it immediately
-#     (recursive-nix backend, per wrapCommand.nix's own verified backend
-#     split), and copies the result to wherever the calling build process
-#     (make, a Makefile, ninja, ...) expects its `.o` file to appear.
-#
-# This is `recursive-nix`-only (inherited from `shim.wrapCommand`'s own
-# v0.2 scope) -- no patched Nix/`builder-rpc-v0` needed, unlike
-# `graph.compile`. `requiredSystemFeatures = [ "recursive-nix" ]` is added
-# to the accelerated derivation automatically.
-#
-# `granularity`: how many translation units share one dynamically-
-#   produced derivation (see the plan's own design doc for the full
-#   file/module/package tradeoff table) -- v0.2 implements only `"file"`
-#   (one derivation per `-c` invocation, the default and the whole point
-#   of the feature) and `"package"` (a pure no-op passthrough, useful for
-#   bisecting whether acceleration itself is the cause of a build
-#   problem).
-#
-#   `"module"` (directory-batched compiles): built on `shim.wrapCommand`'s
-#   `defer` mode plus the `shim.wrapArchiver` companion shim on `ar` --
-#   NOT a live-shim buffering trick (that's impossible: a live shim must
-#   synchronously hand back a real `.o` before `make` continues, so
-#   there's no point to buffer several files' compiles into one
-#   registered derivation without either compiling for real before
-#   registering, which throws away caching, or blocking across
-#   invocations, which risks deadlock under `make -j1`). Instead, a
-#   batched compile's `cc` invocation writes a batch-pending STUB (a real
-#   file satisfying `make`'s `test -e` check, but not a real object --
-#   see `shim/batchStub.nix`) and returns immediately, with zero compile
-#   work done; the deferred work only runs when `ar` later collects every
-#   member of one batch group into ONE registered, realized derivation
-#   (compiling every member for real, then archiving them). This mirrors
-#   nixgg's own `batch`/`batchpending`/`batcharchive` design -- see
-#   `shim/wrapCommand.nix` and `shim/wrapArchiver.nix` for the mechanism,
-#   which required generalizing `wrapCommand` so ONE shim instance can mix
-#   `materialize` (the default) and `defer` PER INVOCATION, decided at
-#   runtime by `toNode`'s own return shape -- not a single static setting
-#   for the whole shim, since only SOME files (the ones `shouldBatch`
-#   opts in) should ever defer.
+# `granularity`: how many translation units share one dynamically-produced
+#   derivation:
+#   - `"file"` (default): every `-c` compile is its own solo unit (no
+#     `key`) -- one dynamically-produced derivation per translation unit,
+#     the whole point of the feature.
+#   - `"module"`: same as `"file"`, but every compile whose relative source
+#     path satisfies the caller-supplied `shouldBatch` predicate gets a
+#     directory-based `key` instead -- every such compile, PLUS any `ar`
+#     step whose own inputs are ALL in that same group, merges into ONE
+#     combined derivation (`shim.collectStubs`'s own auto-merge rule:
+#     a keyless stub -- e.g. an ordinary `ar`/link step -- joins its deps'
+#     shared unit iff every one of those deps already belongs to that
+#     SAME real unit; this generalizes past just `ar`, unlike the earlier
+#     live-shim-era `wrapArchiver`, but the effect for a same-group `ar`
+#     call is identical).
+#   - `"package"`: a pure no-op passthrough (returns `stdenv` unmodified) --
+#     useful for bisecting whether acceleration itself is the cause of a
+#     build problem, without reverting the `.override` call.
 #
 #   `shouldBatch` (required when `granularity = "module"`, ignored
-#   otherwise): a function `relativeSourcePath -> bool`, deciding which
-#   files batch and which stay `"file"`-granularity, UNCONDITIONALLY
+#   otherwise): a function `relativeSourcePath -> bool`, UNCONDITIONALLY
 #   OPT-IN per path -- matching nixgg's own `batch.Config`/`shouldBatch`
 #   design. Batching an actively-edited directory trades saved
 #   registration overhead for wasted real-compiler time on unchanged
@@ -73,67 +49,34 @@
 #
 #   HOW `shouldBatch` crosses the eval/build boundary: `toNode`'s
 #   generated text is `nix-instantiate`d STANDALONE inside the sandbox,
-#   with no access to any outer Nix closure -- an ordinary Nix function
-#   value can't cross that boundary, only data or literal source text can
-#   (the same reason `toNode`/`discoverTree` are plain STRINGS, not real
-#   functions). So `shouldBatch` is evaluated ONCE, at ordinary Nix eval
-#   time, against every file found under `args.src` (recursively) --
-#   producing a concrete `{ <relative-path> = <groupKey>; }` mapping
-#   (directory-based grouping) that gets spliced into `toNode` as literal
-#   JSON data, not a closure. This is a deliberate tradeoff: walking
-#   `args.src` this way triggers a REAL eval-time build (import-from-
-#   derivation), accepted ONLY for `granularity = "module"` -- `"file"`
-#   (the default) never touches `args.src` this way and stays fully
-#   IFD-free. A file present in the Makefile's own build graph but NOT
-#   present under `args.src` at eval time (e.g. a build-generated `.c`
-#   file) is simply never eligible for batching, and silently falls back
-#   to ordinary `"file"`-granularity behavior for that one file.
+#   with no access to any outer Nix closure. So `shouldBatch` is
+#   evaluated ONCE, at ordinary Nix eval time, against every file found
+#   under `args.src` (recursively) -- producing a concrete
+#   `{ <relative-path> = <groupKey>; }` mapping (directory-based
+#   grouping) that gets spliced into `toNode` as literal JSON data, not a
+#   closure. This is a deliberate tradeoff: walking `args.src` this way
+#   triggers a REAL eval-time build (import-from-derivation), accepted
+#   ONLY for `granularity = "module"` -- `"file"` (the default) never
+#   touches `args.src` this way and stays fully IFD-free.
 #
-#   SCOPE LIMIT: `"module"` granularity uses the same flat per-file
-#   store-staging strategy `discoverTree` mode uses for header discovery,
-#   but batched members' individually-staged trees are merged,
-#   sequentially, into ONE shared working directory inside the combined
-#   derivation. This is correct for the common case (files in the same
-#   batch directory referencing shared, identical-content local headers)
-#   but has a real, documented gap: if two DIFFERENT batched members
-#   would stage a DIFFERENT file at the SAME relative path, the later
-#   member's copy silently wins, with no detection or error (matches
-#   nixgg's own `disambiguateOutNames` finding for a different collision
-#   class -- object-file naming, not staged-tree paths -- which this file
-#   does not yet implement an equivalent guard for).
+# DIRECTORY-STRUCTURE / HEADER-DISCOVERY (unchanged from earlier design,
+# still needed for `cc`, NOT needed for `ar` -- see below): a real
+# multi-directory C project routinely compiles with relative `-I` search
+# paths and includes local headers only resolvable through them. The
+# `cc` shim uses `shim.wrapCommand`'s `discoverTree` mode: before
+# deferring each compile/link, run a `cc -M -MG` dependency scan (tolerant
+# of not-yet-generated headers), stage every positional/discovered
+# RELATIVE path into one directory tree (preserving structure), and add
+# it to the store as ONE object, so the eventually-registered
+# derivation's own builder can `cp -r` it into its cwd and run the
+# ORIGINAL relative-path command completely unmodified.
 #
-#   For anyone who already has (or can generate) an explicit list of
-#   nodes rather than a live Makefile -- gradle-drvs'/sandstone's actual
-#   shape -- `dyndrv.graph.compile`'s `group` field plus `dyndrv.graph.
-#   groupByDirectory` is the lower-level, more general mechanism this
-#   accelerator's `"module"` mode is built on top of in spirit (though
-#   NOT literally: `wrapArchiver.nix` has its own independent combined-
-#   derivation renderer, since `graph.compile`'s renderer assumes a
-#   fully-known-up-front node graph, which a live Makefile interception
-#   can't provide -- see `try-it-out/examples/03-graph-with-groups.nix`/
-#   `03-graph-groupby-directory.nix` for that direct-graph-compile path).
-#
-# DIRECTORY-STRUCTURE / HEADER-DISCOVERY (added after direct reproduction
-# against a real nixpkgs package, openssl): a real multi-directory C
-# project routinely compiles with relative `-I` search paths (openssl:
-# `-Iapps/include -Iinclude`) and includes local headers only resolvable
-# through them (`apps.h`, `openssl/opensslconf.h`, ...). Naively adding
-# each positional argv file to the store BY BASENAME (dyndrv's original
-# v0.2 approach) destroys that relative structure -- confirmed by direct
-# reproduction: openssl's real compiles failed with "No such file or
-# directory" on exactly these headers, because a flat, basename-only
-# sandbox has nowhere for a relative `-I` to point. The fix, using
-# `shim.wrapCommand`'s `discoverTree` mode: before registering each
-# compile as its own derivation, run a `cc -M -MG` dependency scan (a
-# real GCC/Clang flag, confirmed by direct reproduction: `cc <original
-# -I flags> -M -MG <source>` prints a Makefile-style rule listing every
-# header the compile would need, using the SAME relative resolution the
-# real compile itself would use -- `-MG` additionally tolerates
-# not-yet-generated headers rather than erroring, since this is a dry
-# run), then stage every positional/discovered RELATIVE path into one
-# directory tree (preserving structure) and add it to the store as ONE
-# object, so the sandbox's builder can `cp -r` it into its cwd and run
-# the ORIGINAL relative-path `cc` invocation completely unmodified.
+# `ar` needs NONE of this: its own positional inputs are already-known
+# relative object/archive paths (themselves other stubs, resolved later
+# by `collectStubs` via cross-unit/sibling placeholder substitution, not
+# via any tree-staging), so it's shimmed with `wrapCommand`'s plain
+# (non-`discoverTree`) variant instead -- a simpler `toNode`, no `-M -MG`
+# scan, no staged tree at all.
 
 {
   stdenv,
@@ -142,6 +85,16 @@
   # `granularity = "module"`; `_: false` matches `"file"`'s own behavior
   # exactly (nothing ever batches).
   shouldBatch ? (_: false),
+  # The Nix to run `nix derivation add`/`nix store add`/`nix store
+  # submit-output` with, inside phase 1's sandbox -- same VERSION-
+  # MATCHING requirement `builders/viaDerivationAdd.nix`'s own header
+  # documents: this must be running a compatible worker-protocol version
+  # to the OUTER Nix actually driving the whole build, or registration
+  # fails with "Operation ... not allowed inside derivation". Defaults
+  # to `pkgs.nix` (the ambient Nix); override when driving the build
+  # through a separately-fetched `builder-rpc-v0`-capable Nix (e.g.
+  # `try-it-out/patched-nix.nix`) that differs from `pkgs.nix`.
+  nixPackage ? pkgs.nix,
 }:
 
 assert builtins.elem granularity [ "file" "module" "package" ];
@@ -151,32 +104,263 @@ let
   # The real `ar`/`ranlib` binaries live under `stdenv.cc.bintools.bintools`,
   # not `stdenv.cc` -- a different nixpkgs wrapper package. That package's
   # own setup hook exports `AR=ar` (the bare name, not a full path), same
-  # "wrapper exports the bare name" gotcha as `CC=gcc`/`CXX=g++` above --
+  # "wrapper exports the bare name" gotcha as `CC=gcc`/`CXX=g++` below --
   # `AR` must be overridden explicitly for the `ar` shim to intercept a
   # real Makefile's `$(AR)` invocation.
   realAr = "${stdenv.cc.bintools.bintools}/bin/ar";
+
+  # Bash port of `toNode` above -- byte-for-byte the SAME decision logic
+  # (probe detection, implicit-output-naming, `-o`-replacement, extra
+  # store-path scanning), just expressed as a shell function instead of a
+  # Nix expression, so `shim.wrapCommand`'s `toNodeBash` fast-path can run
+  # it with NO `nix-instantiate` spawn at all -- confirmed the dominant
+  # per-invocation cost in this shim (see `wrapCommand.nix`'s own
+  # `toNodeBash` header comment for the full rationale, mirroring nixgg's
+  # own registration-tax findings: process/interpreter STARTUP dominates,
+  # not the decision logic itself, which here is pure string prefix/
+  # suffix manipulation with no structural need for a Nix evaluator).
+  #
+  # THIS FUNCTION MUST BE KEPT IN SYNC WITH `toNode` ABOVE -- read that
+  # one first; every comment explaining WHY a given check exists lives
+  # there, not duplicated here. Differences from `toNode`, all purely
+  # mechanical (bash has no `builtins.foldl'`/`builtins.match`, etc.):
+  #   - `outIdx`/positional-arg scanning use a plain `for`-loop over
+  #     argv's own index range instead of `builtins.foldl'`.
+  #   - `extraStorePaths` uses `grep -o`/`sort -u` instead of
+  #     `builtins.match`+dedup-via-attrset.
+  #   - `batchKey` reads `$DYNDRV_BATCH_GROUPS` (the SAME env var
+  #     `toNode`'s own `batchGroupOfRaw` reads via `builtins.getEnv`) via
+  #     `jq`, since this function has no `builtins.fromJSON` available.
+  #   - JSON assembly for the final `record` uses `jq -nc` (one call),
+  #     mirroring `collectStubs.nix`'s own established convention.
+  ccToNodeBash = ''
+    dyndrv_to_node() {
+      local len=$# i out_idx=-1 first_source_idx=-1 has_compile_flag=0
+      local a next_is_o_val=0
+
+      for a in "$@"; do
+        [ "$a" = "-c" ] && has_compile_flag=1
+      done
+
+      i=0
+      for a in "$@"; do
+        if [ "$a" = "-o" ] && [ "$out_idx" = -1 ]; then
+          out_idx=$i
+        fi
+        i=$((i + 1))
+      done
+
+      # `firstSourceIdx`: first non-flag arg that isn't `-o`'s own value.
+      i=0
+      for a in "$@"; do
+        case "$a" in
+          -*) ;;
+          *)
+            if [ "$i" != "$((out_idx + 1))" ] && [ "$first_source_idx" = -1 ]; then
+              first_source_idx=$i
+            fi
+            ;;
+        esac
+        i=$((i + 1))
+      done
+
+      source_path=""
+      if [ "$first_source_idx" != -1 ]; then
+        i=0
+        for a in "$@"; do
+          [ "$i" = "$first_source_idx" ] && source_path="$a"
+          i=$((i + 1))
+        done
+      fi
+
+      out_val=""
+      if [ "$out_idx" != -1 ]; then
+        i=0
+        for a in "$@"; do
+          [ "$i" = "$((out_idx + 1))" ] && out_val="$a"
+          i=$((i + 1))
+        done
+      fi
+
+      # `implicitOutputFile`: cc's own documented default when `-o` is
+      # absent -- "a.out" for a link, source-basename-minus-last-
+      # extension-plus-".o" for a compile.
+      implicit_output=""
+      if [ "$has_compile_flag" = 0 ]; then
+        implicit_output="a.out"
+      elif [ -n "$source_path" ]; then
+        base=$(${pkgs.coreutils}/bin/basename "$source_path")
+        implicit_output="''${base%.*}.o"
+      fi
+
+      # `batchKey`: only ever set for a compile with a known source path,
+      # looked up in `$DYNDRV_BATCH_GROUPS` (empty/unset means "file"/
+      # "package" granularity, or a "module"-mode compile whose source
+      # wasn't found under `args.src` at eval time -- both mean "no key").
+      batch_key="null"
+      if [ "$has_compile_flag" = 1 ] && [ -n "$source_path" ] && [ -n "''${DYNDRV_BATCH_GROUPS:-}" ]; then
+        batch_key=$(printf '%s' "$DYNDRV_BATCH_GROUPS" | ${pkgs.jq}/bin/jq --arg p "$source_path" '.[$p] // null')
+      fi
+
+      # `isConftest`: any of source_path/positional args/the `-o` value
+      # has a basename starting with "conftest".
+      is_conftest() {
+        case "$(${pkgs.coreutils}/bin/basename "$1")" in
+          conftest*) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
+
+      is_probe=0
+      if [ -n "$source_path" ] && is_conftest "$source_path"; then
+        is_probe=1
+      fi
+      if [ "$out_idx" != -1 ] && is_conftest "$out_val"; then
+        is_probe=1
+      fi
+
+      # Positional args (non-flag, not `-o`'s own value) + real-link /
+      # compile-to-executable-probe / info-query detection, and a second
+      # `is_conftest` scan over every positional arg.
+      has_object_or_archive=0
+      has_positional=0
+      i=0
+      for a in "$@"; do
+        case "$a" in
+          -*) ;;
+          *)
+            if [ "$i" != "$((out_idx + 1))" ]; then
+              has_positional=1
+              case "$a" in
+                *.o | *.a | *.so) has_object_or_archive=1 ;;
+              esac
+              if is_conftest "$a"; then
+                is_probe=1
+              fi
+            fi
+            ;;
+        esac
+        i=$((i + 1))
+      done
+
+      is_real_link=0
+      [ "$has_compile_flag" = 0 ] && [ "$has_object_or_archive" = 1 ] && is_real_link=1
+      if [ "$has_compile_flag" = 0 ] && [ "$is_real_link" = 0 ] && [ "$has_positional" = 1 ]; then
+        is_probe=1 # isCompileToExecutableProbe
+      fi
+      if [ "$has_compile_flag" = 0 ] && [ "$is_real_link" = 0 ] && [ "$has_positional" = 0 ]; then
+        is_probe=1 # isInfoQuery
+      fi
+
+      if [ "$is_probe" = 1 ]; then
+        echo null
+        return
+      fi
+      # PASSTHROUGH: a compile whose source is still an absolute path
+      # after `wrapCommand`'s own `stripPwdPrefix` pass.
+      case "$source_path" in
+        /*)
+          if [ "$has_compile_flag" = 1 ]; then
+            echo null
+            return
+          fi
+          ;;
+      esac
+      if [ "$out_idx" = -1 ] && [ -z "$implicit_output" ]; then
+        echo null
+        return
+      fi
+
+      output_file="$out_val"
+      [ "$out_idx" = -1 ] && output_file="$implicit_output"
+
+      # `argvForCc`: replace the EXISTING "-o"'s value with the literal
+      # sentinel "$out" in place, or append "-o $out" if there was none.
+      # Newline-delimited (matching this codebase's own established
+      # convention elsewhere, e.g. `wrapCommand.nix`'s own `rewrittenArgs`
+      # -- an argv element containing a literal newline is not a case
+      # this shim supports anywhere, not just here), fed through `jq -Rs`
+      # to become a real JSON array; the trailing `.[:-1]` drops the
+      # empty element `split("\n")` always produces after the final
+      # newline.
+      argv_for_cc_lines=$(
+        i=0
+        for a in "$@"; do
+          if [ "$i" = "$((out_idx + 1))" ] && [ "$out_idx" != -1 ]; then
+            printf '%s\n' '$out'
+          else
+            printf '%s\n' "$a"
+          fi
+          i=$((i + 1))
+        done
+        if [ "$out_idx" = -1 ]; then
+          printf '%s\n%s\n' "-o" '$out'
+        fi
+      )
+      argv_for_cc_json=$(printf '%s' "$argv_for_cc_lines" | ${pkgs.jq}/bin/jq -R -s 'split("\n") | .[:-1]')
+
+      # `extraStorePaths`: any argv element referencing a store path not
+      # already covered by coreutils/stdenv.cc/the staged tree, e.g.
+      # `-I/nix/store/...-libpng-.../include` glued onto a flag.
+      extra_store_paths_json=$(
+        for a in "$@"; do
+          printf '%s\n' "$a"
+        done | ${pkgs.coreutils}/bin/grep -o "${builtins.storeDir}/[^/\"']*" | while IFS= read -r p; do
+          ${pkgs.coreutils}/bin/basename "$p"
+        done | sort -u | ${pkgs.jq}/bin/jq -R -s 'split("\n") | map(select(. != ""))'
+      )
+
+      record=$(${pkgs.jq}/bin/jq -nc \
+        --argjson key "$batch_key" \
+        --arg tool "${realCc}" \
+        --argjson args "$argv_for_cc_json" \
+        --arg coreutils "${builtins.baseNameOf "${pkgs.coreutils}"}" \
+        --arg stdenvCc "${builtins.baseNameOf "${stdenv.cc}"}" \
+        --arg treeBasename "$DYNDRV_TREE_BASENAME" \
+        --argjson extraSrcs "$extra_store_paths_json" \
+        --arg setupCmdPrefix "${pkgs.coreutils}/bin/cp -r ${builtins.storeDir}/" \
+        --arg setupCmdSuffix "/. . && ${pkgs.coreutils}/bin/chmod -R u+w . &&" \
+        '{
+          key: $key,
+          tool: $tool,
+          args: $args,
+          srcs: ([$coreutils, $stdenvCc, $treeBasename] + $extraSrcs),
+          setupCmd: ($setupCmdPrefix + $treeBasename + $setupCmdSuffix)
+        }')
+
+      if [ "$out_idx" != -1 ]; then
+        ${pkgs.jq}/bin/jq -nc --argjson defer "{\"record\":$(printf '%s' "$record" | ${pkgs.jq}/bin/jq -R .)}" \
+          --argjson outputArg "$out_idx" '{defer: {record: $defer.record}, outputArg: ($outputArg + 1)}'
+      else
+        ${pkgs.jq}/bin/jq -nc --arg record "$record" --arg outputPath "$implicit_output" \
+          '{defer: {record: $record}, outputPath: $outputPath}'
+      fi
+    }
+  '';
 
   # Runs BEFORE `toNode` (inside `wrapCommand`'s wrapper script, per
   # `discoverTree`'s contract -- see wrapCommand.nix's header comment):
   # given the ORIGINAL argv as "$@", prints every RELATIVE header path
   # (one per line) this compile needs beyond what argv already names
-  # directly -- sources/objects argv names positionally are already
-  # covered by `wrapCommand`'s own default handling, so this only needs
-  # to report the DISCOVERED extras. Strips `-c`/`-o <file>` first (this
-  # is a dependency scan, not a real compile -- `-c -o x.o -M` would try
-  # to write the dependency rule INTO x.o instead of printing it, per
-  # GCC's own documented `-M`+`-c`+`-o` interaction, confirmed by direct
-  # reproduction). Only the FIRST (source-file) line of `cc -M`'s output
-  # matters here; the `<target>.o:` prefix and line-continuation
-  # backslashes are stripped so each remaining token is a bare path.
+  # directly. Strips `-c`/`-o <file>` first (this is a dependency scan,
+  # not a real compile), and `-MF <file>`/`-MT <target>`/`-MQ <target>`/
+  # bare `-MMD`/`-MD`/`-MP` (ordinary `make`-generated dependency-file
+  # flags, present on every real autotools/make compile -- leaving
+  # `-MF <file>` in place redirects THIS scan's own `-M -MG` output into
+  # that file instead of stdout, silently discovering nothing). Only the
+  # FIRST (source-file) line of `cc -M`'s output matters here; the
+  # `<target>.o:` prefix and line-continuation backslashes are stripped
+  # so each remaining token is a bare path. `|| true`: a link invocation
+  # (no source file to scan) legitimately discovers nothing, which is
+  # not an error.
   discoverTree = ''
     args=""
     skip_next=0
     for a in "$@"; do
       if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
       case "$a" in
-        -c) continue ;;
-        -o) skip_next=1; continue ;;
+        -c|-MMD|-MD|-MP) continue ;;
+        -o|-MF|-MT|-MQ) skip_next=1; continue ;;
         *) args="$args $a" ;;
       esac
     done
@@ -188,31 +372,22 @@ let
   '';
 
   # Parses a real `cc` invocation's argv (as `wrapCommand`'s wrapper
-  # script sees it -- `$@` WITHOUT the command name itself) and decides
-  # whether this is a single-translation-unit compile (`-c` present) that
-  # should become its own dynamically-produced derivation, or anything
-  # else (link, feature probe, `-E`/`-S` alone, etc.) that should just
-  # run normally. Written using only `builtins` (no `lib`) since this
+  # script sees it -- `$@` WITHOUT the command name itself) and always
+  # defers it -- both compiles (`-c` present) AND links (`-c` absent) --
+  # except for a genuinely foreign invocation (see the "PASSTHROUGH"
+  # branch below). Written using only `builtins` (no `lib`) since this
   # text is instantiated standalone inside the sandbox, without
   # `<nixpkgs>` necessarily on `NIX_PATH` there.
   #
-  # discoverTree mode (see wrapCommand.nix's header comment): `argv` here
-  # is the RAW, unmodified original argv (still relative), and
-  # `DYNDRV_TREE_BASENAME` (read via `builtins.getEnv`, the same eval/
-  # build-boundary convention `mkArgs.nix` established) names the ONE
-  # staged directory-tree input covering every source/header this
-  # compile needs. The generated builder `cp -r`s that tree into its cwd
-  # and then runs the compile with argv COMPLETELY UNCHANGED, so relative
-  # `-I` flags resolve exactly as they would in the real build tree.
-  #
-  # SHARED across `granularity = "file"`/`"module"` (this one `toNode`
-  # text and the `ccShim`/`wrapperDir` built from it are never duplicated
-  # per-mode): `DYNDRV_BATCH_GROUPS` (same env-var-crossing convention as
-  # `DYNDRV_TREE_BASENAME`) is read unconditionally here too, defaulting
-  # to `{}` when unset/empty (what `"file"`/`"package"` mode's
-  # `extendDrvArgs` leaves it, since only `"module"` mode ever sets it) --
-  # so for every mode except an explicitly-batched file under `"module"`,
-  # `batchKey` below is always `null` and behavior is unchanged.
+  # `argv` here is the RAW, unmodified original argv (still relative --
+  # `discoverTree` mode), and `DYNDRV_TREE_BASENAME` (read via
+  # `builtins.getEnv`) names the ONE staged directory-tree input
+  # covering every source/header this invocation needs. `toNode` embeds
+  # this tree's basename in `record.srcs`/`record.setupCmd`; the
+  # eventually-registered derivation's own builder `cp -r`s it into its
+  # cwd before running the compile/link with argv COMPLETELY UNCHANGED,
+  # so relative `-I` flags resolve exactly as they would in the real
+  # build tree.
   toNode = ''
     argv:
     let
@@ -230,21 +405,15 @@ let
                 else acc
       ) (-1) indices;
 
-      # Real builds routinely omit `-o` entirely (confirmed by direct
-      # reproduction against a real `libtool --mode=compile`-driven
-      # autotools build, freetype: every actual `gcc -c foo.c ... -fPIC
-      # -DPIC` invocation had no `-o` at all) -- when absent, the
-      # compiler's own documented default applies: the source file's own
-      # BASENAME (directory stripped), its last extension replaced with
-      # `.o`, written to the CURRENT DIRECTORY (confirmed directly: `cc -c
-      # sub/foo.c` from cwd `sub/` writes `sub/foo.o`; `cc -c /tmp/bar.cpp`
-      # run from `/` FAILS rather than writing to `/tmp/bar.o` -- the
-      # source's own directory is never consulted, only cwd). The first
-      # positional (non-"-"-prefixed) argv element is treated as "the"
-      # source file for this purpose, matching a real single-file `-c`
-      # invocation's own shape (multiple positional sources with `-c` and
-      # no `-o` is a compiler error in practice, not a case this needs to
-      # handle).
+      # Real builds routinely omit `-o` entirely for a COMPILE (confirmed
+      # by direct reproduction against a real `libtool --mode=compile`-
+      # driven autotools build, freetype) -- when absent, the compiler's
+      # own documented default applies: the source file's own BASENAME
+      # (directory stripped), its last extension replaced with `.o`,
+      # written to the CURRENT DIRECTORY. A LINK invocation with no `-o`
+      # defaults to `a.out`, matching `cc`'s own documented default --
+      # this case is rare in practice (most build systems always pass
+      # `-o` for a link) but handled uniformly rather than assumed away.
       firstSourceIdx = builtins.foldl' (
         acc: i: if acc != (-1) then acc
                 else if !(hasPrefix "-" (builtins.elemAt argv i)) && !(i == outIdx + 1) then i
@@ -264,7 +433,10 @@ let
         if n <= 1 then s
         else builtins.concatStringsSep "." (builtins.genList (i: builtins.elemAt segments i) (n - 1));
       sourcePath = if firstSourceIdx == (-1) then null else builtins.elemAt argv firstSourceIdx;
-      implicitOutputFile = if sourcePath == null then null else (stripExt (builtins.baseNameOf sourcePath)) + ".o";
+      implicitOutputFile =
+        if !hasCompileFlag then "a.out"
+        else if sourcePath == null then null
+        else (stripExt (builtins.baseNameOf sourcePath)) + ".o";
 
       # `batchGroupOf`: `{ <relative-source-path> = <groupKey>; }`, built
       # outside the sandbox and threaded across the eval/build boundary
@@ -272,13 +444,99 @@ let
       # full "why"). `builtins.getEnv` returns `""` when unset (the
       # `"file"`/`"package"`-mode case, and any `"module"`-mode compile
       # whose source wasn't found under `args.src` at eval time), treated
-      # as `{}` -- `batchKey` is then always `null` and the compile
-      # proceeds exactly as `"file"` granularity always has.
+      # as `{}` -- `batchKey` is then always `null` (a solo unit, exactly
+      # `"file"` granularity's own shape). A LINK invocation never has a
+      # `batchKey` of its own -- only compiles are ever opted into a
+      # batch group; a link's own unit is decided later by
+      # `shim.collectStubs`'s auto-merge rule, from its real deps.
       batchGroupOfRaw = builtins.getEnv "DYNDRV_BATCH_GROUPS";
       batchGroupOf = if batchGroupOfRaw == "" then { } else builtins.fromJSON batchGroupOfRaw;
-      batchKey = if sourcePath == null then null else (batchGroupOf.''${sourcePath} or null);
+      batchKey =
+        if !hasCompileFlag || sourcePath == null then null else (batchGroupOf.''${sourcePath} or null);
+
+      # PASSTHROUGH signal, most general first: autoconf's OWN feature-
+      # probe harness UNIVERSALLY names its scratch source/object/binary
+      # files `conftest.*`/`conftest` (confirmed directly: every probe in
+      # a real freetype configure run, including ones that need to run a
+      # just-compiled binary immediately AND ones that need a compile to
+      # genuinely FAIL to detect a flag, uses this exact convention) --
+      # a real package build essentially never names an actual build
+      # artifact this way. This is a MUCH more reliable signal than
+      # trying to infer probe-vs-real-build intent from argv shape alone:
+      # a deferred shim's stub always "succeeds" (exit 0) regardless of
+      # what the real compile would have done, which breaks BOTH
+      # "compile then immediately execute the result" probes (confirmed:
+      # `./conftest` on a non-executable stub fails with "Permission
+      # denied") AND "this compile should FAIL to detect a flag" probes
+      # (confirmed: `ac_fn_c_try_compile` always reports success on a
+      # stub, defeating a negative test with no argv-visible difference
+      # from an ordinary positive one). Neither failure mode is fixable
+      # by inspecting argv structure -- only the NAME reliably signals
+      # "this is a throwaway probe, not part of the real build graph".
+      isConftest = a: a != null && hasPrefix "conftest" (builtins.baseNameOf a);
+      hasSuffix = suffix: str:
+        let
+          sl = builtins.stringLength suffix;
+          l = builtins.stringLength str;
+        in
+        l >= sl && builtins.substring (l - sl) sl str == suffix;
+      # Positional (non-flag, non-`-o`-value) argv entries -- the actual
+      # inputs a link step would combine, or the single source a
+      # compile-to-executable probe names.
+      positionalIdxs = builtins.filter (
+        i: !(hasPrefix "-" (builtins.elemAt argv i)) && i != outIdx + 1
+      ) indices;
+      positionalArgs = map (i: builtins.elemAt argv i) positionalIdxs;
+      looksLikeObjectOrArchive = a: hasSuffix ".o" a || hasSuffix ".a" a || hasSuffix ".so" a;
+      # A "link" invocation (no `-c`) whose positional inputs are ALL
+      # source files (no `.o`/`.a`/`.so`) is really a COMPILE-STRAIGHT-
+      # TO-EXECUTABLE, not a real link step -- kept as a SECONDARY
+      # passthrough signal (beyond `isConftest` above) for any probe
+      # that doesn't happen to follow the `conftest` naming convention.
+      isRealLink = !hasCompileFlag && builtins.any looksLikeObjectOrArchive positionalArgs;
+      isCompileToExecutableProbe = !hasCompileFlag && !isRealLink && positionalArgs != [ ];
+      # A non-compile invocation with NO positional inputs at all (not
+      # even a source file to compile-and-run) is one of GCC's own
+      # info-query modes (`-print-multi-os-directory`, `-dumpversion`,
+      # `--version`, `-v`, ...) -- confirmed by direct reproduction
+      # against a real libtool-driven autotools build (freetype): `cc
+      # -print-multi-os-directory -o $out` has no real object/archive/
+      # source input whatsoever, just flags, yet still carries an `-o`
+      # naming where its plain-text stdout should be written. Neither
+      # `isRealLink` nor `isCompileToExecutableProbe` catch this (both
+      # require a positional input), so it fell through to the ordinary
+      # defer path -- deferring a query with no real content to produce
+      # left `$out` never written, and the calling script's own `-o`
+      # target permanently missing.
+      isInfoQuery = !hasCompileFlag && !isRealLink && positionalArgs == [ ];
+      isProbe =
+        isCompileToExecutableProbe
+        || isInfoQuery
+        || isConftest sourcePath
+        || builtins.any isConftest positionalArgs
+        || (outIdx != (-1) && isConftest (builtins.elemAt argv (outIdx + 1)));
     in
-    if !hasCompileFlag || (outIdx == (-1) && implicitOutputFile == null) then
+    # PASSTHROUGH for any probe invocation -- see `isProbe` above. These
+    # need to run for real, synchronously, since either the calling
+    # script executes the result immediately in the same step, or the
+    # probe's own logic depends on the REAL exit code/output, not a
+    # deferred stub's always-successful placeholder.
+    if isProbe then
+      null
+    else
+    # PASSTHROUGH for a compile whose own source is still an ABSOLUTE path
+    # after `wrapCommand`'s `stripPwdPrefix` pass -- confirmed by direct
+    # reproduction against a real ffmpeg build: its own `configure` script
+    # runs GCC feature-probes against scratch files in a THIRD kind of
+    # location (`/build/ffconf.XXXXXXXX/test.c`), neither under the
+    # compile's own `$PWD` nor a real Nix store path. These are transient
+    # compiler self-tests, not part of the package's own cacheable build
+    # graph, so there's no caching value in accelerating them -- run them
+    # for real, unaccelerated, immediately (this is the ONLY case left
+    # that still runs synchronously; nothing else in this shim blocks).
+    if hasCompileFlag && sourcePath != null && hasPrefix "/" sourcePath then
+      null
+    else if outIdx == (-1) && implicitOutputFile == null then
       null
     else
       let
@@ -286,60 +544,25 @@ let
         treeBasename = builtins.getEnv "DYNDRV_TREE_BASENAME";
 
         # Single-quote each argv element for safe embedding in a
-        # /bin/sh -c command line (escaping any literal single-quote
-        # character using the standard POSIX-shell single-quote escape)
-        # -- needed because `builder` is invoked directly, NOT via a
-        # shell, so `$out` in `args` would never expand unless the
-        # actual command line runs through a shell itself (confirmed by
-        # direct reproduction: setting `builder = cc` with a literal
-        # `"$out"` string in `args` produced a real compiled object file
-        # written to a file literally NAMED "$out" in the build
-        # directory, instead of the real output path, since `cc` never
-        # interprets `$out` as a shell variable the way `/bin/sh -c`
-        # would). Routing through `/bin/sh -c` matches
-        # `viaDerivationAdd.nix`/`graph.compile.nix`'s own convention for
-        # exactly this reason.
-        #
-        # NOTE: this whole toNode value is itself a Nix indented string
-        # (see the outer `toNode = "double-single-quote" ... ;` binding
-        # a few lines up) -- so a literal two-single-quote sequence
-        # anywhere in THIS code would be interpreted by the OUTER file
-        # as Nix's own indented-string escape mechanism, not as two
-        # POSIX-shell quote characters (confirmed by direct
-        # reproduction: writing the POSIX escape sequence directly
-        # caused "syntax error... expecting ';'" in the OUTER file,
-        # since the outer parser saw the doubled quote where it expected
-        # the indented string to continue). sq/bs are bound to single
-        # single-quote/backslash characters via `builtins.substring` so
-        # no doubled single-quote ever appears as a literal sequence in
-        # this source file.
+        # /bin/sh -c command line -- see `collectStubs.nix`'s own
+        # `dyndrv_sq` (the eventual RUNTIME rewrite happens there, over
+        # `record.args`; this Nix-side `shellQuote` only matters for the
+        # sentinel string "$out" itself staying unquoted so it can later
+        # be substituted).
         sq = builtins.substring 0 1 "'X";
         bs = builtins.substring 0 1 "\\X";
         shellQuote = s: sq + (builtins.replaceStrings [ sq ] [ (sq + bs + sq + sq) ] s) + sq;
         # When the ORIGINAL argv already has an explicit `-o <file>`, its
-        # value must be REPLACED with `$out`, not left in place while a
-        # second `-o $out` gets appended afterward -- confirmed by direct
-        # reproduction against a real libtool/autoconf probe (`cc -c -o
-        # out/conftest2.o conftest.c`): GCC accepts multiple `-o` flags
-        # silently and uses the LAST one, so appending `-o $out`
-        # unconditionally made the compile write to `$out` (succeeding,
-        # `$? = 0`) while the file the CALLING build actually expected
-        # (`out/conftest2.o`) was never created at all -- a silent,
-        # non-obvious failure mode (the compile "succeeds", but the
-        # caller's own subsequent `test -s conftest.o`-style check then
-        # fails, misreported by autoconf as "PIC flag doesn't work" with
-        # no indication the real cause was dyndrv's own double-`-o` bug).
-        # Since `argv`'s own `-o` value is about to be discarded either
-        # way (the real, sandboxed compile's output path is `$out`,
-        # unrelated to whatever relative path the caller named), this
-        # replaces IN PLACE at `outIdx + 1` rather than filtering it out
-        # and appending anew, preserving every other flag's original
-        # relative position. `argvForCc` (with the literal sentinel
-        # string `"$out"`, unquoted) is used both for the materialize
-        # branch's shell-quoted command line below AND, verbatim, as a
-        # deferred batch member's own `record.args` -- `wrapArchiver`
-        # applies its own shell-quoting downstream, so this array must
-        # stay unquoted here.
+        # value must be REPLACED with the literal sentinel `"$out"`, not
+        # left in place while a second `-o $out` gets appended afterward
+        # -- confirmed by direct reproduction against a real
+        # libtool/autoconf probe: GCC accepts multiple `-o` flags
+        # silently and uses the LAST one, so appending unconditionally
+        # made the compile write to `$out` while the file the CALLING
+        # build actually expected was never created. `argvForCc` (with
+        # the literal, UNQUOTED sentinel "$out") is `record.args` --
+        # `shim.collectStubs`'s own renderer applies its OWN shell-
+        # quoting downstream, so this array must stay unquoted here.
         argvForCc =
           if outIdx != (-1) then
             builtins.genList (
@@ -347,30 +570,14 @@ let
             ) len
           else
             argv ++ [ "-o" "$out" ];
-        quotedArgs = builtins.concatStringsSep " " (
-          map (a: if a == "$out" then a else shellQuote a) argvForCc
-        );
 
         # Any argv element can reference a store path NOT already covered
         # by `stdenv.cc`/`coreutils`/the staged tree -- e.g. `-I/nix/store/
         # ...-libpng-.../include`, glued directly onto the flag with no
         # space (confirmed necessary by direct reproduction against a real
-        # freetype build: `-I/nix/store/...-libpng-apng-.../include/
-        # libpng16` was present correctly in the compile line, but its
-        # store path was never in `inputs.srcs`, so the sandbox never
-        # mounted it at all -- `#include <png.h>` failed with "No such
-        # file or directory" even though the `-I` flag pointing at it was
-        # syntactically correct; declaring `stdenv.cc`/`coreutils` alone,
-        # as the original v0.2 implementation did, only covers the
-        # TOOLCHAIN's own closure, not any OTHER library a real multi-
-        # dependency package like freetype links `-I`/`-L`-style flags
-        # against). `builtins.match` extracts the `<hash>-<name>` store
-        # basename from anywhere inside an argv element's text, whether
-        # standalone (`/nix/store/...`) or glued onto a flag
-        # (`-I/nix/store/...`) -- deduplicated via a plain attrset-as-set
-        # trick since this list can otherwise contain the same input
-        # (e.g. one library referenced by multiple `-I`/`-L` flags) many
-        # times over.
+        # freetype build). `builtins.match` extracts the `<hash>-<name>`
+        # store basename from anywhere inside an argv element's text,
+        # deduplicated via a plain attrset-as-set trick.
         extraStorePathsRaw = builtins.filter (x: x != null) (
           map (
             a:
@@ -383,169 +590,287 @@ let
         extraStorePaths = builtins.attrNames (
           builtins.listToAttrs (map (n: { name = n; value = null; }) extraStorePathsRaw)
         );
-        # Same input set EITHER branch below needs -- shared here once
-        # rather than duplicated.
         srcsList = [
           (builtins.baseNameOf "${pkgs.coreutils}")
           (builtins.baseNameOf "${stdenv.cc}")
           treeBasename
         ] ++ extraStorePaths;
       in
-      (
-        if batchKey != null then
-          # DEFER: this compile is opted into a batch group -- write a
-          # batch-pending stub instead of registering/realizing anything
-          # now; `shim.wrapArchiver` (installed on `ar`) collects every
-          # same-group member into ONE combined derivation later.
-          # `setupCmd` mirrors the materialize branch's own `cp -r`
-          # staging line, since `toNode` here is ALWAYS in `discoverTree`
-          # mode -- every member needs its own discovered tree staged
-          # before compiling.
-          {
-            defer = {
-              record = builtins.toJSON {
-                key = batchKey;
-                tool = "${realCc}";
-                args = argvForCc;
-                srcs = srcsList;
-                # `chmod -R u+w` before `cp -r`: a batched member's own
-                # staged tree can collide, path-for-path, with an earlier
-                # member's already-staged tree in the same shared working
-                # directory (e.g. two files sharing a local header). Nix
-                # store inputs are read-only, and `cp -r` preserves the
-                # source's permissions on the destination -- so a second
-                # `cp -r` onto an already-copied, read-only directory
-                # fails with "Permission denied" even for byte-identical
-                # content (`cp -f` alone doesn't help, since removing a
-                # file needs its PARENT directory writable). `chmod -R
-                # u+w .` on the shared working directory before each
-                # member's `cp -r` guarantees every copy can overwrite.
-                # This does NOT guard against two members staging
-                # DIFFERENT content at the same relative path -- see this
-                # file's header comment's scope-limit note.
-                setupCmd = "${pkgs.coreutils}/bin/chmod -R u+w . && ${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . &&";
-              };
-            };
-          }
-        else
-          {
-            drvJson = builtins.toJSON {
-              name = "dyndrv-cc-''${builtins.baseNameOf outputFile}";
-              system = builtins.currentSystem;
-              builder = "/bin/sh";
-              args = [
-                "-c"
-                "${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${stdenv.cc}/bin/cc ''${quotedArgs}"
-              ];
-              env.out = builtins.placeholder "out";
-              inputs = {
-                drvs = { };
-                srcs = srcsList;
-              };
-              outputs.out = { method = "nar"; hashAlgo = "sha256"; };
-              version = 4;
-            };
-          }
-      )
+      {
+        defer = {
+          record = builtins.toJSON {
+            key = batchKey;
+            tool = "${realCc}";
+            args = argvForCc;
+            srcs = srcsList;
+            # `chmod -R u+w .` AFTER `cp -r`, not before: `cp -r`
+            # preserves the read-only Nix store source's permissions on
+            # the destination, so chmod'ing before is a no-op (the
+            # following `cp -r` overwrites it right back to read-only);
+            # needed both for members sharing a working directory AND
+            # for a real compile writing its own `.d` file back into the
+            # tree (`-MF`, ffmpeg's own dependency-file generation).
+            setupCmd = "${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${pkgs.coreutils}/bin/chmod -R u+w . &&";
+          };
+        };
+      }
       // (if outIdx != (-1) then { outputArg = outIdx + 1; } else { outputPath = implicitOutputFile; })
+  '';
+
+  # `ar`'s own argv shape (simpler and more fixed than `cc`'s -- no
+  # discovery needed, no relative `-I` search paths, no headers): the
+  # FIRST token is the modifiers/command string (e.g. "rcs" -- no
+  # leading `-`, unlike `cc`'s flags), the SECOND is the archive path,
+  # everything after that is a positional object-file input. ALWAYS
+  # defers -- there is no passthrough case for `ar` (unlike `cc`'s
+  # foreign-tempdir-probe exception, no analogous "not part of the
+  # build graph" `ar` invocation is known to occur in practice; if one
+  # ever does, it would need the same absolute-path check `cc`'s
+  # `toNode` uses). No `discoverTree` needed: `ar`'s positional inputs
+  # are already-known relative paths (other stubs, resolved later by
+  # `shim.collectStubs`'s own sibling/cross-unit substitution), never
+  # header files.
+  arToNode = ''
+    argv:
+    let
+      len = builtins.length argv;
+      modifiers = builtins.elemAt argv 0;
+      archivePath = builtins.elemAt argv 1;
+      inputs = builtins.genList (i: builtins.elemAt argv (i + 2)) (len - 2);
+      argvForAr = [ modifiers "$out" ] ++ inputs;
+    in
+    {
+      defer = {
+        record = builtins.toJSON {
+          key = null;
+          tool = "${realAr}";
+          args = argvForAr;
+          # `stdenv.cc.bintools.bintools` (the package `realAr` lives in)
+          # must be declared here -- confirmed necessary by direct
+          # reproduction against a real freetype build: an empty `srcs`
+          # left the sandbox with no `ar` binary mounted at all ("ar: not
+          # found"), since nothing else in the merged unit's own record
+          # chain happened to reference it.
+          srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
+        };
+      };
+      outputArg = 1;
+    }
   '';
 
   ccShim = self.shim.wrapCommand {
     command = "cc";
     realCommand = realCc;
-    inherit toNode discoverTree;
+    toNodeBash = ccToNodeBash;
+    inherit toNode discoverTree nixPackage;
   };
 
-  arShim = self.shim.wrapArchiver {
+  arShim = self.shim.wrapCommand {
     command = "ar";
     realCommand = realAr;
+    toNode = arToNode;
+    inherit nixPackage;
+  };
+
+  # `ranlib`'s own argv shape: the archive path(s) directly, no
+  # modifiers/flags in the common case -- confirmed necessary by direct
+  # reproduction against a real freetype build: libtool's own link step
+  # runs `ranlib` on the archive `ar` JUST created, and since `ar`'s own
+  # output there is a deferred STUB (not yet a real archive), an
+  # unshimmed `ranlib` fails outright ("file format not recognized").
+  # Defers exactly like `ar` -- its own positional argument (the archive
+  # path) is itself a pending stub, which `shim.collectStubs`'s own
+  # sibling/cross-unit resolution handles the same way any other
+  # stub-referencing invocation is handled; no `key` of its own, so it
+  # joins whatever unit its one input (the archive) already belongs to.
+  realRanlib = "${stdenv.cc.bintools.bintools}/bin/ranlib";
+  ranlibToNode = ''
+    argv:
+    let
+      len = builtins.length argv;
+      # `ranlib`'s only positional argument (the LAST one, tolerating
+      # any leading flags like `-D`) is both its input AND its own
+      # output -- it indexes an archive in place, it doesn't produce a
+      # separate result. Reusing that SAME path for `outputArg` means
+      # the wrapper copies the realized result back over the identical
+      # relative path the calling build already expects.
+      archiveIdx = len - 1;
+      argvForRanlib = builtins.genList (
+        i: if i == archiveIdx then "$out" else builtins.elemAt argv i
+      ) len;
+    in
+    {
+      defer = {
+        record = builtins.toJSON {
+          key = null;
+          tool = "${realRanlib}";
+          args = argvForRanlib;
+          # Same "the tool's own store path must be declared as a src"
+          # requirement as `arToNode` above -- `ranlib` shares the same
+          # `bintools` package as `ar`, so this is the same input, just
+          # declared independently since `ranlib`'s own record may be
+          # rendered without `ar`'s (e.g. chained standalone) and each
+          # record's `srcs` must be self-sufficient.
+          srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
+        };
+      };
+      outputArg = archiveIdx;
+    }
+  '';
+  ranlibShim = self.shim.wrapCommand {
+    command = "ranlib";
+    realCommand = realRanlib;
+    toNode = ranlibToNode;
+    inherit nixPackage;
   };
 
   # cc-wrapper's own setup hook exports `CC=gcc` (the real compiler's
-  # binary NAME, not "cc") directly into the build environment (confirmed
-  # by direct reproduction: a Makefile's `CC ?= cc` has no effect, since
-  # `?=` only applies when `CC` is unset, and it's already set) -- so
+  # binary NAME, not "cc") directly into the build environment -- so
   # shadowing `cc` alone on `$PATH` doesn't intercept anything a real
   # build actually calls. The wrapper is installed under BOTH names
-  # (`cc` and `gcc`) and `CC`/`CXX` are also overridden explicitly, so
-  # this works regardless of which name-and-lookup convention a given
-  # Makefile/build system happens to use. Built unconditionally (shared
-  # across every `granularity` value) -- installing an unused `ar` shim
-  # costs nothing for `"file"`/`"package"` mode, since only `"module"`
-  # mode's `extendDrvArgs` branch below overrides `AR` to point at it.
+  # (`cc` and `gcc`) and `CC`/`CXX`/`AR`/`RANLIB` are also overridden
+  # explicitly.
   wrapperDir = pkgs.runCommand "dyndrv-cc-shim" { } ''
     mkdir -p $out/bin
     install -Dm755 ${pkgs.writeText "cc" ccShim.wrapperScript} $out/bin/cc
     ln -s cc $out/bin/gcc
     install -Dm755 ${pkgs.writeText "ar" arShim.wrapperScript} $out/bin/ar
+    install -Dm755 ${pkgs.writeText "ranlib" ranlibShim.wrapperScript} $out/bin/ranlib
   '';
+
+  # `shouldBatch`'s eval-time-computed grouping, threaded across the
+  # eval/build boundary as `DYNDRV_BATCH_GROUPS` -- see this file's
+  # header comment for the full "why" and the accepted IFD cost (only
+  # for `granularity = "module"`).
+  batchGroupOfAttrs =
+    src:
+    let
+      srcRoot = toString src;
+      allSrcFiles = map (
+        f: builtins.unsafeDiscardStringContext (lib.removePrefix (srcRoot + "/") (toString f))
+      ) (lib.filesystem.listFilesRecursive src);
+      batchedFiles = builtins.filter shouldBatch allSrcFiles;
+    in
+    builtins.listToAttrs (
+      map (p: {
+        name = p;
+        value = lib.dirOf p;
+      }) batchedFiles
+    );
 in
 if granularity == "package" then
   stdenv
 else
-  # NOT `stdenv.override` -- `stdenv` is a functor-based attrset with its
-  # own bootstrapping machinery (confirmed by direct reproduction: naive
-  # `.override` calls fail with "function 'anonymous lambda' called with
-  # unexpected argument 'mkDerivation'", since `stdenv`'s underlying
-  # function has a fixed, closed argument set unrelated to `mkDerivation`
-  # overriding). The correct, general nixpkgs pattern for this
-  # ("build helper that behaves like `mkDerivation`, wrapping an existing
-  # one") is `lib.extendMkDerivation` -- already used by
-  # `mkDynamicDerivation.nix` for the SAME reason. Returning a plain
-  # attrset `{ inherit mkDerivation; }` (rather than trying to be a real
-  # `stdenv`) is deliberate: callers only ever need `.mkDerivation` from
-  # this value (matching the "point this at an existing package, change
-  # one line" adoption story: `myPkg.override { stdenv =
-  # dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }` --
-  # a one-line, ordinary nixpkgs `.override` call, not a separate wrapper
-  # function).
-  stdenv
-  // {
-    mkDerivation = lib.extendMkDerivation {
-      constructDrv = stdenv.mkDerivation;
-      extendDrvArgs =
-        finalAttrs: args:
-        {
+  let
+    # `mkDerivation` must accept BOTH call conventions real nixpkgs
+    # packages use for `stdenv.mkDerivation`: a plain attrset, OR a
+    # `finalAttrs: {...}` function (confirmed necessary by direct
+    # reproduction: `pkgs.freetype`'s own definition uses the latter,
+    # self-referencing `finalAttrs.pname`/`.version` inside its own
+    # `src`) -- mirrors nixpkgs' own `lib.extendMkDerivation`'s
+    # `__functor` dispatch (`isFunction fpargs then fpargs final else
+    # fpargs`), specifically the lazy self-referential fixed point:
+    # `finalArgs` is bound to the FULLY RESOLVED attrset this function
+    # itself computes and returns, which Nix's own laziness allows to
+    # reference itself before it's fully evaluated.
+    #
+    # The result's own `overrideAttrs` is a CUSTOM one, NOT the one
+    # nixpkgs' own `stdenv.mkDerivation` would attach -- confirmed
+    # necessary by direct reproduction against real, unmodified freetype:
+    # `phases.split`'s returned value is PHASE 2's own ordinary
+    # derivation (install/fixup only), so ITS default `overrideAttrs`
+    # only ever re-runs phase 2's construction, with `src` still pointing
+    # at phase 1's ALREADY-RESOLVED, stale output -- a caller's
+    # `.overrideAttrs (old: { patches = old.patches ++ [x]; })` (the
+    # standard nixpkgs idiom for exactly the "patch this package" case
+    # this accelerator exists to make cheap) silently never reaches
+    # `patchPhase` at all, since that phase only runs in PHASE 1, which
+    # already built with the ORIGINAL args before the override call ever
+    # happens. Confirmed directly: freetype.override{stdenv=...}.
+    # overrideAttrs(old: {patches = old.patches ++ [x];}) applied only
+    # freetype's own 7 real patches under the accelerated stdenv (x
+    # silently dropped), while the identical call under `pkgs.stdenv`
+    # applied all 8 (x included) -- same shape as the bug nixpkgs' own
+    # `makeDerivationExtensible` was written to prevent for ordinary
+    # `mkDerivation`, just reappearing here because `phases.split`
+    # interposes a second, independent `stdenv.mkDerivation` call (phase
+    # 2's) whose own default `overrideAttrs` has no way to know phase 1
+    # needs re-running too.
+    #
+    # The fix mirrors `makeDerivationExtensible`'s own self-referential
+    # pattern exactly (see `pkgs/stdenv/generic/make-derivation.nix`):
+    # `rattrs` is `fpargs` normalized to always be a `final: {...}`
+    # function; `args` is computed by feeding `rattrs` ITS OWN eventual
+    # result (`args // { inherit overrideAttrs; }`) -- Nix's laziness
+    # allows this because `overrideAttrs`'s OWN definition doesn't force
+    # `args`'s value, only closes over `rattrs`. `overrideAttrs f0`
+    # computes the merged overlay exactly like nixpkgs' own
+    # `thisOverlay` (`f0` may be `prev: {...}` OR `final: prev: {...}`,
+    # both real nixpkgs call shapes), then calls `mkDerivation` AGAIN
+    # with the merged function -- re-running the WHOLE `phases.split`
+    # call, phase 1 included, from scratch with the new args. `mkDerivation`
+    # is a genuinely recursive `let` binding (Nix `let` bindings can always
+    # reference themselves and each other, unlike a plain `//`-merged
+    # attrset attribute) so `overrideAttrs`, defined per-call INSIDE
+    # `mkDerivation`'s own body below (closing over THIS call's own
+    # `rattrs`, needed to compute `prev`), can call `mkDerivation` again by
+    # name.
+    mkDerivation =
+      fpargs:
+      let
+        rattrs = if builtins.isFunction fpargs then fpargs else (_: fpargs);
+        args = rattrs (args // { inherit overrideAttrs; });
+        overrideAttrs =
+          f0:
+          mkDerivation (
+            final:
+            let
+              prev = rattrs final;
+              thisOverlay =
+                if builtins.isFunction f0 then
+                  let
+                    fPrev = f0 prev;
+                  in
+                  if builtins.isFunction fPrev then f0 final prev else fPrev
+                else
+                  f0;
+            in
+            prev // thisOverlay
+          );
+      in
+      assert
+        args ? pname && args ? version
+        || throw "dyndrv.accelerate.mkAcceleratedStdenv: mkDerivation call must set pname/version (phases.split needs both to name phase 1's own inner derivation) -- name-only calls aren't supported yet";
+      self.phases.split {
+        inherit stdenv nixPackage;
+        inherit (args) pname version;
+        sandboxed = args // {
           nativeBuildInputs = [ wrapperDir ] ++ (args.nativeBuildInputs or [ ]);
-          requiredSystemFeatures = (args.requiredSystemFeatures or [ ]) ++ [ "recursive-nix" ];
           CC = "${wrapperDir}/bin/cc";
           CXX = "${wrapperDir}/bin/cc";
+          AR = "${wrapperDir}/bin/ar";
+          RANLIB = "${wrapperDir}/bin/ranlib";
         }
-        // lib.optionalAttrs (granularity == "module") (
-          let
-            # Collects every REGULAR file's path relative to `args.src`'s
-            # own root, via nixpkgs' own `lib.filesystem.
-            # listFilesRecursive` rather than a hand-rolled walk. This
-            # triggers a REAL eval-time build (import-from-derivation),
-            # accepted only here -- `"file"` granularity never reaches
-            # this branch and stays fully IFD-free.
-            #
-            # `unsafeDiscardStringContext` is required: `toString` on a
-            # path from `listFilesRecursive` carries string CONTEXT (a
-            # dependency on `args.src`'s own derivation) that
-            # `removePrefix` doesn't strip -- without discarding it, Nix
-            # rejects the resulting "relative path" string when it's
-            # later used as a plain env var value ("is not allowed to
-            # refer to a store path"), even though the string's actual
-            # text is just a relative path.
-            srcRoot = toString args.src;
-            allSrcFiles = map (
-              f: builtins.unsafeDiscardStringContext (lib.removePrefix (srcRoot + "/") (toString f))
-            ) (lib.filesystem.listFilesRecursive args.src);
-            batchedFiles = builtins.filter shouldBatch allSrcFiles;
-            # Directory-based grouping -- every batched file's own group
-            # key is simply its containing directory.
-            batchGroupOf = builtins.listToAttrs (
-              map (p: {
-                name = p;
-                value = lib.dirOf p;
-              }) batchedFiles
-            );
-          in
-          {
-            DYNDRV_BATCH_GROUPS = builtins.toJSON batchGroupOf;
-            AR = "${wrapperDir}/bin/ar";
-          }
-        );
-    };
+        // lib.optionalAttrs (granularity == "module") {
+          DYNDRV_BATCH_GROUPS = builtins.toJSON (batchGroupOfAttrs args.src);
+        };
+        replay = args;
+      }
+      // {
+        inherit overrideAttrs;
+      };
+  in
+  # `stdenv // { mkDerivation = ...; }`, NOT a fresh `{ inherit stdenv;
+  # ...; }` attrset -- the RETURNED value must still carry every real
+  # `stdenv` attribute (`hostPlatform`, `cc`, `buildPlatform`, etc.), not
+  # just `.mkDerivation`, since real packages' own `.override { stdenv =
+  # ...; }` machinery (confirmed necessary by direct reproduction against
+  # `pkgs.freetype.override { inherit stdenv; }`) reads OTHER stdenv
+  # attributes off the value passed as `stdenv`, not just `.mkDerivation`
+  # -- a nested `{ stdenv = <real stdenv>; }` shape fails with "attribute
+  # 'hostPlatform' missing" the moment anything looks for it directly on
+  # the top-level value.
+  stdenv
+  // {
+    inherit mkDerivation;
   }

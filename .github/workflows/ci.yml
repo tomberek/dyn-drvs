@@ -1,56 +1,11 @@
 name: CI
 
-# `recursive-nix` requires the outer Nix build to run inside a sandbox
-# that itself permits a NESTED Nix daemon invocation (unprivileged user
-# namespaces) -- this is supported on GitHub-hosted `ubuntu-latest`
-# runners and is exactly what `nix-installer-action` sets up by default,
-# but has NOT been verified by an actual CI run as of when this workflow
-# was written (only verified locally, on this development machine) --
-# if `recursive-nix` jobs fail here with a sandbox/namespace-permission
-# error rather than a real dyndrv bug, that's the first thing to check.
-
 on:
   push:
     branches: [master]
   pull_request:
 
 jobs:
-  test-recursive-nix:
-    name: Tests (recursive-nix)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Run nix/tests/run-tests.sh
-        run: nix/tests/run-tests.sh
-
-      - name: Run examples 02/04/05/06 (no builder-rpc-v0 needed)
-        run: |
-          nix build --extra-experimental-features "nix-command" \
-            --no-link -f try-it-out/examples/02-fallback-ifd.nix
-          # `--extra-system-features` has no effect against the default
-          # multi-user daemon (system-features are fixed at daemon
-          # startup, confirmed directly) -- a local, non-daemon store is
-          # required for anything needing recursive-nix/builder-rpc-v0,
-          # same as nix/tests/run-tests.sh already does.
-          nix build --extra-experimental-features "nix-command dynamic-derivations ca-derivations recursive-nix" \
-            --extra-system-features recursive-nix --impure \
-            --store "local?root=/tmp/dyndrv-ci-store" \
-            --no-link -f try-it-out/examples/04-wrap-command.nix
-          nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
-            --extra-system-features recursive-nix \
-            --store "local?root=/tmp/dyndrv-ci-store" \
-            --no-link -f try-it-out/examples/05-accelerate-stdenv.nix
-          nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
-            --extra-system-features recursive-nix \
-            --store "local?root=/tmp/dyndrv-ci-store" \
-            --no-link -f try-it-out/examples/06-accelerate-stdenv-module.nix
-
-      - name: small-lib-patch-rebuild.sh regression check
-        run: ./try-it-out/benchmarks/small-lib-patch-rebuild.sh 10 300
-
   test-builder-rpc-v0:
     name: Tests (builder-rpc-v0, via try-it-out/run-nix.sh)
     runs-on: ubuntu-latest
@@ -67,8 +22,13 @@ jobs:
       - name: Verify run-nix.sh can fetch+build a working Nix
         run: ./try-it-out/run-nix.sh --version
 
-      - name: Run examples 01/03-graph-of-two/03-graph-of-three/03-graph-with-groups/03-graph-groupby-directory
+      - name: Run nix/tests/run-tests.sh
+        run: nix/tests/run-tests.sh
+
+      - name: Run examples 01/02/03-graph-of-two/03-graph-of-three/03-graph-with-groups/03-graph-groupby-directory
         run: |
+          nix build --extra-experimental-features "nix-command" \
+            --no-link -f try-it-out/examples/02-fallback-ifd.nix
           ./try-it-out/run-nix.sh build --impure --no-link \
             -f try-it-out/examples/01-hello-dynamic-drv.nix
           ./try-it-out/run-nix.sh build --impure --no-link \
@@ -79,3 +39,20 @@ jobs:
             -f try-it-out/examples/03-graph-with-groups.nix
           ./try-it-out/run-nix.sh build --impure --no-link \
             -f try-it-out/examples/03-graph-groupby-directory.nix
+
+      - name: Run examples 05/06 (accelerate.mkAcceleratedStdenv, builder-rpc-v0)
+        run: |
+          ./try-it-out/run-nix.sh build --impure --no-link \
+            -f try-it-out/examples/05-accelerate-stdenv.nix
+          ./try-it-out/run-nix.sh build --impure --no-link \
+            -f try-it-out/examples/06-accelerate-stdenv-module.nix
+
+      - name: Run example 07 (accelerate.mkAcceleratedStdenv against real nixpkgs freetype)
+        run: |
+          ./try-it-out/run-nix.sh build --impure --no-link \
+            -f try-it-out/examples/07-accelerate-real-package.nix accelerated
+          ./try-it-out/run-nix.sh build --impure --no-link \
+            -f try-it-out/examples/07-accelerate-real-package.nix patchOutput
+
+      - name: small-lib-patch-rebuild.sh regression check
+        run: ./try-it-out/benchmarks/small-lib-patch-rebuild.sh 10 300

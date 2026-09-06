@@ -3,6 +3,19 @@
 , dyndrv ? import ../../nix { inherit pkgs lib; }
 , variant ? "plain" # "plain" | "accelerated"
 , patch ? null # optional path: a one-file patch to apply before building
+, patches ? null # optional list of paths: multiple patches, e.g. for a version-bump simulation (mutually exclusive with `patch`)
+, nixPackage ? pkgs.nix
+# Absolute store path of the `builder-rpc-v0`-capable Nix to pass as
+# `mkAcceleratedStdenv`'s own `nixPackage` -- must match the OUTER Nix
+# actually driving this build (see that file's own header comment for
+# the version-matching requirement). When set, takes precedence over
+# `nixPackage` above -- mirrors `small-lib.nix`'s own `nixPackagePath`
+# param, needed here for the identical reason: a driving BASH script
+# resolves the patched Nix's store path once via `nix build ... '^out'`
+# and must pass it across the process boundary as a plain string
+# (`--argstr`), not as a Nix expression referencing an already-built
+# derivation.
+, nixPackagePath ? null
 }:
 
 # The Nix side of real-package-patch-rebuild.sh: builds real nixpkgs
@@ -37,20 +50,28 @@
 # stderr noise leaking into a calling autoconf probe's captured output.
 
 let
+  resolvedNixPackage =
+    if nixPackagePath != null then builtins.storePath nixPackagePath else nixPackage;
+
   stdenv =
     if variant == "accelerated" then
-      dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }
+      dyndrv.accelerate.mkAcceleratedStdenv { nixPackage = resolvedNixPackage; stdenv = pkgs.stdenv; }
     else
       pkgs.stdenv;
 
   base = pkgs.freetype.override { inherit stdenv; };
+
+  extraPatches =
+    if patches != null then patches
+    else if patch != null then [ patch ]
+    else [ ];
 in
 base.overrideAttrs (
   old:
   {
     doCheck = false;
   }
-  // lib.optionalAttrs (patch != null) {
-    patches = (old.patches or [ ]) ++ [ patch ];
+  // lib.optionalAttrs (extraPatches != [ ]) {
+    patches = (old.patches or [ ]) ++ extraPatches;
   }
 )

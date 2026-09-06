@@ -2,11 +2,12 @@
   description = "dyndrv: shared library and tooling for Nix dynamic derivations";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.follows = "nix/nixpkgs";
+    nix.url = "github:nixos/nix";
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, nix }:
     let
       systems = [
         "x86_64-linux"
@@ -40,11 +41,27 @@
           let
             pkgs = nixpkgs.legacyPackages.${system};
           in
-          pkgs.mkShell {
-            packages = with pkgs; [
-              jq
+
+          pkgs.mkShellNoCC {
+            name = "nixgg-shell";
+            packages = [
+              pkgs.gnumake
+              pkgs.coreutils
+              pkgs.bash
+              nix.packages.${system}.nix
             ];
+            shellHook = ''
+
+              : "''${NIXGG_STORE:=local?root=/tmp/dyn-drv-store}"
+              echo "nix shell: prepending patched Nix and pointing NIX_CONFIG at an alt store" >&2
+              export NIX_CONFIG="
+              extra-experimental-features = nix-command flakes impure-derivations ca-derivations dynamic-derivations configurable-impure-env
+              extra-system-features = builder-rpc-v0
+              store = ''${NIXGG_STORE}
+              "
+            '';
           };
+
       });
     };
 }

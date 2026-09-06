@@ -20,9 +20,9 @@
 #
 # IMPORTANT, stated plainly (per the plan's mandate to report where the
 # win does NOT hold, not just where it does): at small per-file compile
-# cost, the accelerated path's per-derivation registration/realise
-# round-trip (`nix derivation add` + `nix-store --realise`, via
-# `shim.wrapCommand`'s `recursive-nix` backend) can cost MORE than just
+# cost, the accelerated path's per-derivation registration round-trip
+# (`nix derivation add` + `nix store submit-output`, via
+# `shim.wrapCommand`'s `builder-rpc-v0` backend) can cost MORE than just
 # recompiling everything plainly would have. Confirmed directly: with
 # LOOPS=40 (cheap per-file compiles), a 50-file patched rebuild took
 # ~11.4s accelerated vs. ~3.6s plain -- accelerated was SLOWER, because
@@ -69,7 +69,17 @@ if [[ -z "${KEEP:-}" ]]; then
 fi
 
 EXTRA_FEATURES="nix-command ca-derivations dynamic-derivations recursive-nix"
-SYSTEM_FEATURES="recursive-nix"
+SYSTEM_FEATURES="builder-rpc-v0"
+
+# `mkAcceleratedStdenv`'s own version-matching requirement (see its
+# header): the Nix driving this build and the `nixPackage` it passes
+# internally to `builder-rpc-v0` registration calls must be the SAME
+# fetched build -- resolved once here via `patched-nix.nix`, exactly the
+# way `try-it-out/run-nix.sh` does for the example files.
+DYNDRV_ROOT="$(dirname "$SCRIPT_DIR")"
+DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths \
+  -f "$DYNDRV_ROOT/patched-nix.nix" '^out')
+NIX_BIN="$DYNDRV_NIX/bin/nix"
 
 echo "dyndrv small-lib-patch-rebuild benchmark"
 echo "nFiles=$NFILES, LOOPS=$LOOPS, workdir=$WORKDIR"
@@ -85,12 +95,13 @@ rm -rf "$WORKDIR/src-patched-tmp"
 
 nix_build() {
   local store="$1" src="$2" variant="$3"
-  nix build \
+  "$NIX_BIN" build \
     --extra-experimental-features "$EXTRA_FEATURES" \
     --extra-system-features "$SYSTEM_FEATURES" \
     --store "local?root=$store" \
     --no-link --print-out-paths \
     --arg src "$src" --argstr variant "$variant" \
+    --argstr nixPackagePath "$DYNDRV_NIX" \
     -f "$SCRIPT_DIR/small-lib.nix"
 }
 
@@ -106,9 +117,13 @@ time_build() {
 }
 
 count_dyndrv_builds() {
-  # Counts distinct `dyndrv-cc-*.drv` builder invocations in the log --
-  # metric 2, "derivations rebuilt" for the accelerated path.
-  grep -c "building '.*dyndrv-cc-.*\.drv'" "$WORKDIR/last-build.log" || true
+  # Counts distinct per-unit builder invocations `shim.collectStubs`
+  # registers -- metric 2, "derivations rebuilt" for the accelerated
+  # path. A solo unit's own registered name is `dyndrv-<flattened-
+  # relative-path>` (e.g. `dyndrv-lib_5_o` for `lib_5.o`); a merged
+  # batch unit is `dyndrv-batch-<key>` -- both start with `dyndrv-`, and
+  # nothing else this benchmark builds does.
+  grep -c "building '.*dyndrv-.*\.drv'" "$WORKDIR/last-build.log" || true
 }
 
 echo "=== Plain stdenv.mkDerivation ==="

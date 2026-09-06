@@ -6,13 +6,16 @@ methodology and the four metrics tracked). Updated via reviewed PR when
 numbers move meaningfully — this is what makes claims here checkable
 rather than a one-time README assertion.
 
-All numbers below were measured on this machine (2026-08-31): `nix
-(Determinate Nix 3.20.0) 2.34.6`, `recursive-nix` backend (no patched Nix
-required for anything in this file — `builder-rpc-v0` is not exercised by
-the accelerator, see `mkAcceleratedStdenv.nix`'s header). Absolute numbers
-will differ on other hardware; the *shape* of the results (large win at
-real compile cost, honest loss at trivial compile cost, break-even
-in between) is what should reproduce.
+All numbers below were measured on this machine. Dates are noted per
+section since different sections were measured at different points as
+the architecture evolved — `registration-overhead.sh`/
+`small-lib-patch-rebuild.sh` predate the `builder-rpc-v0`/`phases.split`
+migration and still reflect the `recursive-nix`-backed design active at
+the time; `real-package-patch-rebuild.sh`/`real-package-version-bump.sh`
+(2026-09-05) reflect the CURRENT architecture. Absolute numbers will
+differ on other hardware; the *shape* of the results (large win at real
+compile cost, honest loss at trivial compile cost, break-even in
+between) is what should reproduce.
 
 ## registration-overhead.sh (metric 3 — the "tax")
 
@@ -113,34 +116,115 @@ into every `cc` invocation via `-DOPENSSLDIR=`/`-DENGINESDIR=`/
 whenever ANY outer-derivation attribute changes (including applying a
 one-line patch), this makes EVERY per-TU derivation's hash change too,
 defeating per-TU caching structurally on any patch, for ANY package that
-does this — not a dyndrv bug. nixgg's own real fix for this (confirmed by
-reading its source directly) requires the `builder-rpc-v0` backend plus a
-`out = "/nonexistent"` sentinel during a sandboxed build phase, then a
-SEPARATE ordinary-derivation phase that restores real paths and
-`patchelf`-fixes RPATHs — genuinely v0.3 scope (`phases.split`), not a
-v0.2 fix. freetype doesn't bake `$out` into its compile flags, so it
-demonstrates the same real-package-scale value within v0.2's current
-scope, honestly, without requiring that larger architecture.
+does this — not a dyndrv bug. `dyndrv.phases.split` (the `builder-rpc-v0`
+sandboxed/replay two-phase split) generalizes past this limitation —
+freetype doesn't happen to need it, but the mechanism now exists.
+
+**These numbers were re-measured on 2026-09-05, under the CURRENT
+`builder-rpc-v0`/`phases.split` architecture** (superseding the numbers
+this section previously reported, which were measured under an earlier
+`recursive-nix`-backed design that no longer exists in this codebase —
+`mkAcceleratedStdenv` has no `recursive-nix` code path at all anymore).
 
 | | Plain `stdenv.mkDerivation` | `accelerate.mkAcceleratedStdenv` |
 |---|---|---|
-| Cold build | 41.22s | 82.70s |
-| Patched rebuild (1 real file changed) | 16.69s | 26.64s |
-| Dynamic derivations rebuilt (patched) | n/a (1 opaque derivation) | 4 (2 configure-time probes + 2 real compiles of the patched file — libtool compiles each source twice, once static, once `-fPIC`) |
+| Cold build | 21.21s | 67.03s |
+| Patched rebuild (1 real file changed) | 14.07s | 49.33s |
+| Dynamic derivations rebuilt (patched) | n/a (1 opaque derivation) | 2 (both compiles of the patched file — libtool compiles each source twice, once static, once `-fPIC`; configure-time probes are pure passthrough, never registered as dyndrv derivations at all) |
 
-**Speedup on patched rebuild: 0.63x — accelerated is SLOWER here, reported
-honestly.** freetype's real per-file compile time is small enough that
-the per-derivation registration tax dominates, and `configure` reruns
-from scratch on both sides regardless of acceleration (neither variant
-has an autoconf cache layer). This is the same break-even shape
-`small-lib-patch-rebuild.sh`'s own LOOPS-scaled fixture already
-demonstrates — freetype just happens to land on the "not yet worth it"
-side of that line on this machine, which this benchmark reports rather
-than hides. What DOES improve is the *number* of things needing rebuild
-(4 real per-TU derivations vs. one full opaque rebuild) — real signal
-that the mechanism is working correctly on a genuine multi-directory
-package with real header dependencies, even though it doesn't yet convert
-to a wall-clock win at this package's scale.
+**Speedup on patched rebuild: 0.29x — accelerated is SLOWER here,
+reported honestly.** freetype's real per-file compile time is small
+enough that the per-derivation registration tax dominates, and
+`configure` reruns from scratch on both sides regardless of acceleration
+(neither variant has an autoconf cache layer). This is the same
+break-even shape `small-lib-patch-rebuild.sh`'s own LOOPS-scaled fixture
+already demonstrates — freetype just happens to land on the "not yet
+worth it" side of that line on this machine, which this benchmark
+reports rather than hides. What DOES improve is the *number* of things
+needing rebuild (2 real per-TU derivations vs. one full opaque rebuild)
+— real signal that the mechanism is working correctly on a genuine
+multi-directory package with real header dependencies, even though it
+doesn't yet convert to a wall-clock win at this package's scale.
+
+## real-package-version-bump.sh (metrics 1, 2, 4 — multi-file patch)
+
+Run: `try-it-out/benchmarks/real-package-version-bump.sh`
+
+Same real, unmodified nixpkgs `freetype` as above, but with a THREE-file
+patch (`src/base/ftglyph.c`, `src/truetype/truetype.c`,
+`src/base/ftinit.c`, across two different subdirectories) instead of a
+single-file change — a closer proxy for what a real upstream point-
+release bump's diff typically touches (a handful of scattered bugfixes,
+not one isolated line).
+
+**Why a source patch, not an actual fetch of two real releases**:
+confirmed directly, this environment (and any similarly sandboxed CI
+runner) has no network access for uncached fetches — `nix build` on a
+`fetchurl` for a tarball not already in the local store hangs rather
+than failing fast. A multi-file source patch is a faithful,
+network-independent proxy for the property this benchmark actually needs
+to demonstrate (per-file caching granularity scales with how many files
+actually changed), without requiring egress in CI.
+
+Measured 2026-09-05, same architecture as `real-package-patch-rebuild.sh`
+above:
+
+| | Plain `stdenv.mkDerivation` | `accelerate.mkAcceleratedStdenv` |
+|---|---|---|
+| Cold build | 21.66s | 66.41s |
+| Version-bump rebuild (3 files changed) | 14.11s | 47.29s |
+| Dynamic derivations rebuilt | n/a (1 opaque derivation) | 6 (3 changed files × 2 compiles each, exactly as predicted — libtool's static/`-fPIC` double-compile convention applies per changed file) |
+
+**Speedup: 0.30x — same honest shape as the single-file benchmark**,
+confirming the win/loss ratio doesn't change qualitatively as the number
+of changed files grows from 1 to 3: metric 2 (derivations rebuilt) stays
+exactly proportional to files actually changed (2 → 6, doubling then
+tripling as expected), while plain's cost is flat regardless of how many
+files a real version bump touches. This is the concrete evidence that
+`dyndrv`'s per-file caching granularity genuinely scales with the SIZE of
+a version bump's diff, not just with a synthetic single-line patch.
+
+### A real bug found while building this: `overrideAttrs` silently dropped patches (RESOLVED)
+
+Building both benchmarks above surfaced a genuine, previously-
+undiscovered correctness bug in `mkAcceleratedStdenv` itself, not a
+benchmark-script issue: `phases.split`'s returned derivation's
+`overrideAttrs` was nixpkgs' own DEFAULT one (attached by phase 2's own
+real `stdenv.mkDerivation` call), which only ever re-runs PHASE 2's
+construction — `src` still pointed at phase 1's already-resolved, stale
+output. A caller's `.overrideAttrs (old: { patches = old.patches ++
+[x]; })` (the standard nixpkgs idiom for patching a package, and exactly
+what both benchmarks above need to demonstrate the version-bump story at
+all) silently never reached `patchPhase`, since that phase only runs in
+phase 1, which had already built with the ORIGINAL args before the
+override call happened. Confirmed directly: the accelerated variant
+applied only freetype's own 7 real upstream patches while silently
+dropping the benchmark's own extra patch, while the identical
+`.overrideAttrs` call under plain `pkgs.stdenv` applied all 8 correctly.
+
+**Fixed** by giving `mkAcceleratedStdenv`'s own `mkDerivation` function a
+custom `overrideAttrs` that mirrors nixpkgs' own `makeDerivationExtensible`
+self-referential pattern (see `pkgs/stdenv/generic/make-derivation.nix`)
+— re-invoking the WHOLE `mkDerivation`/`phases.split` call with merged
+args, rebuilding phase 1 from scratch, rather than delegating to phase
+2's own default override. Verified directly: after the fix, both
+benchmarks' patches correctly reach `patchPhase` (`patching file
+src/base/ftglyph.c` etc. appear in the build log), and examples 05/06
+rebuild to byte-identical output, confirming no regression to the
+existing, unaffected call path.
+
+### Historical: bugs found building the real-package benchmark under the earlier `recursive-nix` architecture
+
+The section below (six bugs, `-MF` misclassification through internal
+`nix`-command stderr leakage) was found and fixed while first building a
+real-package benchmark under the ORIGINAL `recursive-nix`-backed
+`mkAcceleratedStdenv` design, before the `builder-rpc-v0`/`phases.split`
+migration. Kept as a historical record of the kind of gaps a real
+package's build surface exposes that toy fixtures don't — several of the
+underlying mechanisms it describes (e.g. the `discoverTree` staging path)
+are still part of the current architecture, but the specific numbers and
+bug descriptions below predate the current backend and should not be
+read as describing today's code path 1:1.
 
 ### Six real bugs found and fixed while building this benchmark against a real package
 

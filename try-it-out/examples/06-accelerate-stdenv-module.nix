@@ -2,34 +2,32 @@
 # `granularity = "module"` mode: point this at an existing package with
 # one line changed (same adoption story as `05-accelerate-stdenv.nix`),
 # but opt a `vendor/` subdirectory into batched compilation via
-# `shouldBatch` -- both files under `vendor/` compile into ONE registered,
-# realized derivation, while `main.c` (outside `vendor/`) keeps the
-# default per-file behavior. See `nix/lib/accelerate/mkAcceleratedStdenv.nix`'s
+# `shouldBatch` -- both files under `vendor/` compile into ONE combined
+# derivation (plus the `ar` step that archives them, auto-merged in by
+# `shim.collectStubs`'s own rule: a keyless stub -- the `ar` call --
+# joins its deps' shared unit since both its inputs already share that
+# SAME group), while `main.c` (outside `vendor/`) keeps the default
+# per-file behavior. See `nix/lib/accelerate/mkAcceleratedStdenv.nix`'s
 # header comment for the full design and its documented scope limits.
 #
-# Exercises `shim.wrapCommand`'s `defer` mode (writes a batch-pending
-# stub instead of registering/realizing immediately) plus the `shim.
-# wrapArchiver` companion shim on `ar` (collects every same-group stub
-# into one combined compile+archive derivation).
-#
-# `recursive-nix`-only (same backend scope as `granularity = "file"`).
+# `builder-rpc-v0`-only (phase 1's own requirement; phase 2, which runs
+# `installPhase`, needs no special capability at all).
 #
 # Run with:
-#   nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
-#     --extra-system-features recursive-nix --store 'local?root=/tmp/dyndrv-store' \
-#     -f try-it-out/examples/06-accelerate-stdenv-module.nix
+#   try-it-out/run-nix.sh build --impure --no-link -f try-it-out/examples/06-accelerate-stdenv-module.nix
 #
 # Builds a 3-file C program (main.c + vendor/lib_a.c + vendor/lib_b.c)
-# via an ordinary Makefile; `nix log` on the resulting derivation shows
-# exactly ONE `dyndrv-batch-vendor.drv` build for BOTH vendor files (not
-# two separate `dyndrv-cc-*.drv` registrations), while `main.c` still
-# gets its own solo `dyndrv-cc-main.o.drv`. The final linked binary runs
-# and produces correct output (5 = lib_a(1) + lib_b(1) = 2 + 3).
+# via an ordinary Makefile; the final linked binary runs and produces
+# correct output (5 = lib_a(1) + lib_b(1) = 2 + 3).
 
 let
   pkgs = import <nixpkgs> { };
   lib = pkgs.lib;
   dyndrv = import ../../nix { inherit pkgs lib; };
+
+  # See 05-accelerate-stdenv.nix's own comment on this -- must match the
+  # Nix `try-it-out/run-nix.sh` uses to drive this build.
+  patchedNix = import ../patched-nix.nix { };
 
   src = pkgs.runCommand "accelerate-module-example-src" { } ''
     mkdir -p $out/vendor
@@ -75,6 +73,7 @@ in
 plain.override {
   stdenv = dyndrv.accelerate.mkAcceleratedStdenv {
     inherit (plain) stdenv;
+    nixPackage = patchedNix;
     granularity = "module";
     # Opt-in per path -- here, everything under vendor/ batches.
     shouldBatch = path: lib.hasPrefix "vendor/" path;
