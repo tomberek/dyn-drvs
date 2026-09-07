@@ -1,0 +1,4 @@
+# Build artifacts produced by `make` (directly, or via dyndrv's
+# accelerated stdenv / devShell wrappers).
+*.o
+hello
