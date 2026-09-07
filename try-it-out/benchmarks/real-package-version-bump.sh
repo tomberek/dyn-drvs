@@ -61,8 +61,23 @@ DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths \
   -f "$DYNDRV_ROOT/patched-nix.nix" '^out')
 NIX_BIN="$DYNDRV_NIX/bin/nix"
 
+# `USE_COMPILED_SHIM=1` re-measures against the compiled `rust/
+# dyndrv-shim` path -- see `real-package-patch-rebuild.sh`'s own
+# identical wiring for the full rationale.
+DYNDRV_SHIM_ARGS=()
+if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
+  DYNDRV_SHIM=$(nix build --impure --no-link --print-out-paths \
+    -f "$DYNDRV_ROOT/../rust/dyndrv-shim.nix" '^out')
+  DYNDRV_SHIM_ARGS=(--argstr dyndrvShimPath "$DYNDRV_SHIM")
+fi
+
 echo "dyndrv real-package-version-bump benchmark (nixpkgs freetype, multi-file patch)"
 echo "workdir=$WORKDIR"
+if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
+  echo "shim=compiled ($DYNDRV_SHIM)"
+else
+  echo "shim=bash (toNodeBash/collectStubs)"
+fi
 echo ""
 
 cat > "$WORKDIR/version-bump.diff" <<'PATCH_EOF'
@@ -108,6 +123,7 @@ nix_build() {
     --no-link --print-out-paths \
     --impure --argstr variant "$variant" \
     --argstr nixPackagePath "$DYNDRV_NIX" \
+    "${DYNDRV_SHIM_ARGS[@]}" \
     "${patchArgs[@]}" \
     -f "$SCRIPT_DIR/real-package-lib.nix"
 }
@@ -122,9 +138,15 @@ time_build() {
 }
 
 count_dyndrv_builds() {
-  # Same convention `real-package-patch-rebuild.sh`/
-  # `small-lib-patch-rebuild.sh` already use.
-  grep -c "building '.*dyndrv-.*\.drv'" "$WORKDIR/last-build.log" || true
+  # Same convention `real-package-patch-rebuild.sh`'s own identical
+  # helper uses -- see that script's header comment for the full
+  # rationale on why the compiled path's own naming needs a different
+  # pattern than the bash path's `dyndrv-`-prefixed convention.
+  if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
+    grep -cE "building '.*(\.o|\.lo)\.drv'|building '.*dyndrv-batch-.*\.drv'" "$WORKDIR/last-build.log" || true
+  else
+    grep -c "building '.*dyndrv-.*\.drv'" "$WORKDIR/last-build.log" || true
+  fi
 }
 
 echo "=== Plain stdenv.mkDerivation (real nixpkgs freetype) ==="
@@ -140,6 +162,13 @@ echo "  ${plain_patch_time}s (rebuilds the whole derivation)"
 echo ""
 
 echo "=== dyndrv.accelerate.mkAcceleratedStdenv (real nixpkgs freetype) ==="
+if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
+  # See `real-package-patch-rebuild.sh`'s own identical step for why
+  # this copy is required -- a fresh alt store has no substituter for
+  # the ambient-store-built, purely-local `DYNDRV_SHIM` closure.
+  mkdir -p "$WORKDIR/store-accelerated"
+  "$NIX_BIN" copy --no-check-sigs --to "local?root=$WORKDIR/store-accelerated" "$DYNDRV_SHIM"
+fi
 echo "-- cold build --"
 time_build "$WORKDIR/store-accelerated" "accelerated" 0
 acc_cold_time=$(cat "$WORKDIR/last-elapsed")

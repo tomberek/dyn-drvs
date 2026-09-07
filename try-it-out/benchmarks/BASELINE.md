@@ -196,6 +196,62 @@ above — hence the closer-to-even 0.35x vs. 0.06x — consistent with both
 being genuine wall-clock measurements on a shared machine, not a
 methodology difference between the two scripts.)
 
+## Re-measured against the COMPILED `dyndrv-shim` path (2026-09-07)
+
+The bash-path numbers above (`toNodeBash`/`collectStubs`) are for the
+ORIGINAL shim implementation. `real-package-lib.nix` gained a
+`dyndrvShim`/`dyndrvShimPath` param (mirroring examples 05/06/07's own
+`-compiled.nix` variants) and both benchmark scripts gained a
+`USE_COMPILED_SHIM=1` env var, re-measuring against the COMPILED
+`rust/dyndrv-shim` path instead — now unblocked by this session's own
+symlink-IR redesign (tasks #85/#86) and the earlier `/nonexistent`-
+unwritable fix (both paths share `phases.split`, so that fix applies to
+both regardless of shim).
+
+**A real wiring bug found and fixed getting this far**: a fresh alt
+store (each benchmark run's own `store-accelerated`, an isolated,
+just-created Nix store) has no substituter for the compiled shim's own
+closure — unlike `nixPackagePath`'s identical-shaped `patched-nix.nix`
+dependency, which resolves via nixpkgs' real binary cache, the compiled
+shim is a small, purely local derivation with no cache entry anywhere.
+The very first attempt failed outright ("is required, but there is no
+substituter that can build it"); fixed by having each script explicitly
+`nix copy --no-check-sigs --to "local?root=$store" "$DYNDRV_SHIM"`
+before building against that store (the `--no-check-sigs` is needed too
+— the target alt store doesn't trust the ambient signing key by
+default). `count_dyndrv_builds`'s own grep pattern also needed a second
+fix: the compiled path's `run_sandbox_eager_tail` names each derivation
+after the caller's own OUTPUT basename (e.g. `ftglyph.o.drv`), not the
+bash path's `dyndrv-<name>.drv` convention — confirmed via direct build
+log inspection, fixed by branching the grep pattern on
+`USE_COMPILED_SHIM`.
+
+Run: `USE_COMPILED_SHIM=1 try-it-out/benchmarks/real-package-patch-rebuild.sh`
+/ `USE_COMPILED_SHIM=1 try-it-out/benchmarks/real-package-version-bump.sh`
+
+| | Plain | Bash-path accelerated | Compiled-path accelerated |
+|---|---|---|---|
+| Patch: cold build | 26.93s | (see bash section above) | 45.87s |
+| Patch: rebuild (1 file) | 4.69s | (see bash section above) | 34.76s |
+| Patch: dynamic derivations rebuilt | n/a | 2 | 2 |
+| Version-bump: cold build | 11.88s | (see bash section above) | 44.97s |
+| Version-bump: rebuild (3 files) | 18.03s | (see bash section above) | 35.65s |
+| Version-bump: dynamic derivations rebuilt | n/a | 6 | 6 |
+
+**Speedup, patch rebuild: 0.14x. Speedup, version-bump rebuild: 0.51x
+— same honest shape as the bash path**, and the derivation COUNTS match
+the bash path exactly (2 and 6, respectively) — confirming the compiled
+path's own eager register+symlink redesign (tasks #85/#86, this
+session) produces the SAME granularity of caching as the original bash
+collector, just via a different registration mechanism. The compiled
+path's own wall-clock numbers land in the SAME "not yet worth it at
+freetype's per-file compile scale" bucket as the bash path — expected,
+since both pay a comparable per-derivation `add_drv_to_store`+`nix-
+store --realise` round-trip cost per changed file; this redesign's own
+goal was never raw speed over the bash path, but a cleaner intermediate
+representation (real symlinks instead of ad-hoc stubs) with equivalent
+observable behavior, which these numbers confirm.
+
 ### A real bug found while building this: `overrideAttrs` silently dropped patches (RESOLVED)
 
 Building both benchmarks above surfaced a genuine, previously-
@@ -271,13 +327,11 @@ build succeeded."
 
 Both benchmarks above were RE-MEASURED on 2026-09-06 after this fix
 (see their own updated tables) — the bash path (`toNodeBash`,
-`dyndrvShim` unset) is confirmed unblocked and working. Re-measuring
-the COMPILED path's (`toNodeCompiled`/`dyndrvShim`) own wall-clock
-numbers against these two scripts (currently they only exercise
-`real-package-lib.nix`'s default bash-path call) remains open follow-on
-work — `real-package-lib.nix` would need a `dyndrvShim` param threaded
-through the same way the `05`/`06`/`07`-`-compiled.nix` example
-variants already do.
+`dyndrvShim` unset) is confirmed unblocked and working. The COMPILED
+path's own wall-clock numbers against these two scripts were
+subsequently re-measured on 2026-09-07 — see this file's own "Re-
+measured against the COMPILED `dyndrv-shim` path" section above.
+
 
 ### Historical: bugs found building the real-package benchmark under the earlier `recursive-nix` architecture
 

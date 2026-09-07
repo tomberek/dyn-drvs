@@ -16,6 +16,18 @@
 # (`--argstr`), not as a Nix expression referencing an already-built
 # derivation.
 , nixPackagePath ? null
+# The compiled `rust/dyndrv-shim` package (providing `bin/dyndrv-shim`/
+# `bin/dyndrv-collect`), threaded through to `mkAcceleratedStdenv`'s own
+# `dyndrvShim` param -- mirrors examples 05/06/07's own `-compiled.nix`
+# variants exactly. Defaults to `null` (bash `toNodeBash`/`collectStubs`
+# path, unchanged behavior) -- set to re-measure the COMPILED path's own
+# wall-clock numbers against this same real-package fixture.
+, dyndrvShim ? null
+# Absolute store path of the compiled `dyndrv-shim` package -- mirrors
+# `nixPackagePath`'s own identical "driving bash script resolves it once,
+# passes it across the process boundary as a plain string" pattern, for
+# the same reason. Takes precedence over `dyndrvShim` above when set.
+, dyndrvShimPath ? null
 }:
 
 # The Nix side of real-package-patch-rebuild.sh: builds real nixpkgs
@@ -53,9 +65,16 @@ let
   resolvedNixPackage =
     if nixPackagePath != null then builtins.storePath nixPackagePath else nixPackage;
 
+  resolvedDyndrvShim =
+    if dyndrvShimPath != null then builtins.storePath dyndrvShimPath else dyndrvShim;
+
   stdenv =
     if variant == "accelerated" then
-      dyndrv.accelerate.mkAcceleratedStdenv { nixPackage = resolvedNixPackage; stdenv = pkgs.stdenv; }
+      dyndrv.accelerate.mkAcceleratedStdenv {
+        nixPackage = resolvedNixPackage;
+        stdenv = pkgs.stdenv;
+        dyndrvShim = resolvedDyndrvShim;
+      }
     else
       pkgs.stdenv;
 
