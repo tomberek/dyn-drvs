@@ -40,6 +40,11 @@
 
 let
   realCc = "${stdenv.cc}/bin/cc";
+  # See `mkAcceleratedStdenv.nix`'s own `realCxx` doc comment for why a
+  # C++ build needs the shim pointed at the REAL `c++`, not `cc` --
+  # `stdenv.cc` provides both as distinct binaries, and linking a C++
+  # translation unit via plain `cc` fails outright without `-lstdc++`.
+  realCxx = "${stdenv.cc}/bin/c++";
   realAr = "${stdenv.cc.bintools.bintools}/bin/ar";
   realRanlib = "${stdenv.cc.bintools.bintools}/bin/ranlib";
   bintoolsBasename = builtins.baseNameOf "${stdenv.cc.bintools.bintools}";
@@ -63,22 +68,39 @@ let
     DYNDRV_COREUTILS_BASENAME = coreutilsBasename;
     DYNDRV_STDENV_CC_BASENAME = stdenvCcBasename;
   };
+  # A SEPARATE shim instance from `ccShim` -- same `command = "cc"`
+  # dispatch (`dyndrv-shim`'s own `DYNDRV_TOOL` match has no separate
+  # "cxx" case; a C vs. C++ compile's own argv-decision shape is
+  # identical), just `realCommand`/`DYNDRV_REAL_COMMAND` pointed at the
+  # real `c++` -- mirrors `mkAcceleratedStdenv.nix`'s own `cxxShim`.
+  cxxShim = mkCompiledShim "cc" realCxx {
+    DYNDRV_COREUTILS_BASENAME = coreutilsBasename;
+    DYNDRV_STDENV_CC_BASENAME = stdenvCcBasename;
+  };
   arShim = mkCompiledShim "ar" realAr { DYNDRV_BINTOOLS_BASENAME = bintoolsBasename; };
   ranlibShim = mkCompiledShim "ranlib" realRanlib {
     DYNDRV_BINTOOLS_BASENAME = bintoolsBasename;
     DYNDRV_COREUTILS_BASENAME = coreutilsBasename;
   };
 
-  # cc-wrapper's own setup hook exports `CC=gcc` (the real compiler's
-  # binary NAME, not "cc") into the shell environment -- so shadowing
-  # `cc` alone on `$PATH` doesn't intercept `$CC`/`$CXX`-driven builds
-  # (same gotcha `mkAcceleratedStdenv.nix`'s own `wrapperDir` comment
-  # documents). Installed under both `cc` and `gcc`, matching that file's
-  # convention exactly; `CC`/`CXX` are exported explicitly below.
+  # cc-wrapper's own setup hook exports `CC=gcc`/`CXX=g++` (the real
+  # compiler binaries' own bare NAMES) into the shell environment -- so
+  # shadowing `cc`/`c++` alone on `$PATH` doesn't intercept `$CC`/`$CXX`-
+  # driven builds (same gotcha `mkAcceleratedStdenv.nix`'s own
+  # `wrapperDir` comment documents, including the real C++-project bug
+  # that surfaced it: linking a C++ TU via the `cc`-only shim -- the
+  # ONLY wrapper this devShell installed before this fix -- fails
+  # outright without `-lstdc++`, and a plain `CXX="${wrapperDir}/bin/
+  # cc"` export pointed the shim at the wrong underlying tool). Installed
+  # under `cc`/`gcc` AND `c++`/`g++`, matching that file's convention
+  # exactly; `CC`/`CXX` are exported explicitly below, now pointed at
+  # their own correct binaries.
   wrapperDir = pkgs.runCommand "dyndrv-shim-devshell-wrapper" { } ''
     mkdir -p $out/bin
     install -Dm755 ${pkgs.writeText "cc" ccShim.wrapperScript} $out/bin/cc
     ln -s cc $out/bin/gcc
+    install -Dm755 ${pkgs.writeText "c++" cxxShim.wrapperScript} $out/bin/c++
+    ln -s c++ $out/bin/g++
     install -Dm755 ${pkgs.writeText "ar" arShim.wrapperScript} $out/bin/ar
     install -Dm755 ${pkgs.writeText "ranlib" ranlibShim.wrapperScript} $out/bin/ranlib
   '';
@@ -87,7 +109,7 @@ in
   shellHook = ''
     export PATH="${wrapperDir}/bin:$PATH"
     export CC="${wrapperDir}/bin/cc"
-    export CXX="${wrapperDir}/bin/cc"
+    export CXX="${wrapperDir}/bin/c++"
     export AR="${wrapperDir}/bin/ar"
     export RANLIB="${wrapperDir}/bin/ranlib"
     export DYNDRV_MODE=rpc
@@ -96,5 +118,5 @@ in
 
   # Exposed for callers that want to inspect/reuse the wrapper directly
   # (e.g. a test harness) rather than only via `shellHook`'s PATH splice.
-  inherit wrapperDir ccShim arShim ranlibShim;
+  inherit wrapperDir ccShim cxxShim arShim ranlibShim;
 }

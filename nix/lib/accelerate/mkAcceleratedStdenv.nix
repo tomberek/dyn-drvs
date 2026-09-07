@@ -114,6 +114,19 @@ assert builtins.elem granularity [ "file" "module" "package" ];
 let
   useCompiledShim = dyndrvShim != null;
   realCc = "${stdenv.cc}/bin/cc";
+  # `stdenv.cc`'s own package ALSO provides a real, separate `c++`
+  # binary (confirmed by direct reproduction: `ls stdenv.cc/bin` lists
+  # both `cc`/`gcc` AND `c++`/`g++` as distinct files, not aliases) --
+  # `cc`/`c++` differ in more than just default file-extension handling:
+  # confirmed by direct reproduction that LINKING a C++ translation
+  # unit's own `.o` via `cc` (not `c++`) fails outright ("undefined
+  # reference to `std::cout'" etc.) unless `-lstdc++` is added
+  # explicitly, since only `c++`'s own wrapper defaults to linking
+  # against libstdc++. A C++ build's `$(CXX)`-driven compile AND link
+  # steps therefore both need the shim pointed at the REAL `c++`, not
+  # `cc` -- see `cxxShim` below, a SEPARATE `wrapCommand` instance from
+  # `ccShim`.
+  realCxx = "${stdenv.cc}/bin/c++";
   # The real `ar`/`ranlib` binaries live under `stdenv.cc.bintools.bintools`,
   # not `stdenv.cc` -- a different nixpkgs wrapper package. That package's
   # own setup hook exports `AR=ar` (the bare name, not a full path), same
@@ -691,6 +704,26 @@ let
     inherit toNode discoverTree nixPackage;
   };
 
+  # A SEPARATE `wrapCommand` instance from `ccShim` -- same decision
+  # logic (`toNode`/`toNodeBash`/`discoverTree` all identical, since a
+  # C vs. C++ compile's OWN argv-decision shape is identical, only the
+  # underlying tool binary differs), just `realCommand`/`DYNDRV_REAL_
+  # COMMAND` pointed at the real `c++` instead of `cc` -- see `realCxx`'s
+  # own doc comment above for why this distinction matters (linking a
+  # C++ TU via plain `cc` fails outright without `-lstdc++`).
+  cxxShim = self.shim.wrapCommand {
+    command = "cc";
+    realCommand = realCxx;
+    toNodeBash = ccToNodeBash;
+    toNodeCompiled = if useCompiledShim then dyndrvShim else null;
+    compiledEnv = lib.optionalAttrs useCompiledShim {
+      DYNDRV_REAL_COMMAND = realCxx;
+      DYNDRV_COREUTILS_BASENAME = builtins.baseNameOf "${pkgs.coreutils}";
+      DYNDRV_STDENV_CC_BASENAME = builtins.baseNameOf "${stdenv.cc}";
+    };
+    inherit toNode discoverTree nixPackage;
+  };
+
   arShim = self.shim.wrapCommand {
     command = "ar";
     realCommand = realAr;
@@ -761,16 +794,36 @@ let
     inherit nixPackage;
   };
 
-  # cc-wrapper's own setup hook exports `CC=gcc` (the real compiler's
-  # binary NAME, not "cc") directly into the build environment -- so
-  # shadowing `cc` alone on `$PATH` doesn't intercept anything a real
-  # build actually calls. The wrapper is installed under BOTH names
-  # (`cc` and `gcc`) and `CC`/`CXX`/`AR`/`RANLIB` are also overridden
-  # explicitly.
+  # cc-wrapper's own setup hook exports `CC=gcc`/`CXX=g++` (the real
+  # compiler binaries' own bare NAMES, not "cc"/"c++") directly into the
+  # build environment -- so shadowing `cc`/`c++` alone on `$PATH` doesn't
+  # intercept anything a real build actually calls. Confirmed by direct
+  # reproduction: `gcc-wrapper`'s own `nix-support/setup-hook` runs its
+  # `export CXX=g++` UNCONDITIONALLY, AFTER this derivation's own `env.
+  # CXX` attr override below is already set -- setup hooks run at the
+  # START of a real sandboxed build, before `buildPhase`, so a plain
+  # `env.CXX = "${wrapperDir}/bin/cc";` override alone is silently
+  # clobbered the moment ANY C++ translation unit's own build actually
+  # runs, falling through to the REAL, unshimmed `g++` on `$PATH`
+  # instead -- meaning C++ sources were never being accelerated at all
+  # until this wrapper was ALSO installed under `c++`/`g++` (this exact
+  # gap was found via a real C++ project, `example/`, the first C++
+  # fixture this repo ever exercised through `mkAcceleratedStdenv` --
+  # every prior example used plain C, where `CC=gcc` is correctly
+  # covered by the `cc`/`gcc` symlink pair below, so this never
+  # surfaced before). `cxxShim` (a distinct `wrapCommand` instance
+  # pointed at the REAL `c++`, not `cc` -- see `realCxx`'s own doc
+  # comment) is installed under BOTH `c++` and `g++` here, mirroring
+  # `ccShim`'s own `cc`/`gcc` pair exactly. `CC`/`CXX`/`AR`/`RANLIB` are
+  # ALSO overridden explicitly below (`sandboxed` attrset) -- belt and
+  # suspenders, since some build systems read the env var directly
+  # without ever touching `$PATH`.
   wrapperDir = pkgs.runCommand "dyndrv-cc-shim" { } ''
     mkdir -p $out/bin
     install -Dm755 ${pkgs.writeText "cc" ccShim.wrapperScript} $out/bin/cc
     ln -s cc $out/bin/gcc
+    install -Dm755 ${pkgs.writeText "c++" cxxShim.wrapperScript} $out/bin/c++
+    ln -s c++ $out/bin/g++
     install -Dm755 ${pkgs.writeText "ar" arShim.wrapperScript} $out/bin/ar
     install -Dm755 ${pkgs.writeText "ranlib" ranlibShim.wrapperScript} $out/bin/ranlib
   '';
@@ -884,7 +937,7 @@ else
         sandboxed = args // {
           nativeBuildInputs = [ wrapperDir ] ++ (args.nativeBuildInputs or [ ]);
           CC = "${wrapperDir}/bin/cc";
-          CXX = "${wrapperDir}/bin/cc";
+          CXX = "${wrapperDir}/bin/c++";
           AR = "${wrapperDir}/bin/ar";
           RANLIB = "${wrapperDir}/bin/ranlib";
         }
