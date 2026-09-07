@@ -74,22 +74,39 @@ fn main() -> anyhow::Result<()> {
 
     // Phase 7: register one derivation per unit, in unit-topo order.
     let mut drv_path_by_unit: HashMap<String, StorePath> = HashMap::new();
+    // A solo unit's own real output name -- `"out"` for a freshly
+    // RENDERED solo record (this file's own established convention),
+    // but a GROUP-member eager stub (task #86: `Sandbox` mode's
+    // module-granularity path, `run_sandbox_group_tail`) is ALWAYS
+    // registered as its own solo unit here too (it has no `key` this
+    // file's own Phase 4 merge rule can see, and no `deps` -- see
+    // `collect::discover_stubs`' own doc comment) while carrying a
+    // REAL, non-`"out"` output name within its OWN group's shared
+    // multi-output derivation. Every "is_solo -> out" shortcut below
+    // must consult this map instead of assuming `"out"` unconditionally,
+    // or a group member's own cross-reference/final-tree placeholder
+    // would silently resolve to the WRONG output (typically `"out"`
+    // simply not existing on that derivation at all, since group
+    // derivations declare one output PER member, never a plain `"out"`).
+    let mut solo_output_name: HashMap<String, OutputName> = HashMap::new();
 
     for u in &unit_order {
         let members = &members_by_unit[u];
         let is_solo = members.len() == 1;
 
         // An eager stub (task #85: `Sandbox` mode's file-granularity
-        // path, `run_sandbox_eager_tail`) is ALREADY a registered
-        // derivation -- `assign_units` always places it alone in its
-        // own solo unit (it has no `key` and no `deps` to join a
-        // dependency's unit through, see `discover_stubs`' own doc
-        // comment), so `is_solo` here always holds for it. Reuse its
-        // known `StorePath` directly instead of rendering+registering a
-        // redundant new derivation for the same content.
+        // path; task #86: module-granularity's own group-member path)
+        // is ALREADY a registered derivation -- `assign_units` always
+        // places it alone in its own solo unit (it has no `key` and no
+        // `deps` to join a dependency's unit through, see `discover_
+        // stubs`' own doc comment), so `is_solo` here always holds for
+        // it. Reuse its known `StorePath`/`OutputName` directly instead
+        // of rendering+registering a redundant new derivation for the
+        // same content.
         if is_solo {
-            if let Some(drv_path) = stubs[&members[0]].eager_drv.clone() {
+            if let Some((drv_path, out_name)) = stubs[&members[0]].eager_drv.clone() {
                 drv_path_by_unit.insert(u.clone(), drv_path);
+                solo_output_name.insert(u.clone(), out_name);
                 continue;
             }
         }
@@ -101,13 +118,13 @@ fn main() -> anyhow::Result<()> {
             |dep_stub_path| {
                 let du = unit_of.get(dep_stub_path)?;
                 let drv_path = drv_path_by_unit.get(du)?;
-                let out_name: OutputName = output_name_for_cross_ref(
+                let out_name = output_name_for_cross_ref(
+                    du,
                     &members_by_unit[du],
                     dep_stub_path,
                     &output_name_of_stub,
-                )
-                .parse()
-                .ok()?;
+                    &solo_output_name,
+                )?;
                 Some(
                     Placeholder::ca_output(drv_path, &out_name)
                         .render()
@@ -159,25 +176,26 @@ fn main() -> anyhow::Result<()> {
             if let Some(dep_drv_path) = drv_path_by_unit.get(du) {
                 let dep_members = &members_by_unit[du];
                 let is_dep_solo = dep_members.len() == 1;
-                let outs: HashSet<String> = members[..]
+                let outs: HashSet<OutputName> = members[..]
                     .iter()
                     .flat_map(|p| stubs[p].deps.iter())
                     .filter(|d| &unit_of[*d] == du)
-                    .map(|d| {
+                    .filter_map(|d| {
                         if is_dep_solo {
-                            "out".to_string()
+                            solo_output_name
+                                .get(du)
+                                .cloned()
+                                .or_else(|| "out".parse().ok())
                         } else {
-                            output_name_of_stub[d].clone()
+                            output_name_of_stub[d].parse().ok()
                         }
                     })
                     .collect();
-                for out_str in outs {
-                    if let Ok(out_name) = out_str.parse::<OutputName>() {
-                        drv.inputs.insert(SingleDerivedPath::Built {
-                            drv_path: Arc::new(SingleDerivedPath::Opaque(dep_drv_path.clone())),
-                            output: out_name,
-                        });
-                    }
+                for out_name in outs {
+                    drv.inputs.insert(SingleDerivedPath::Built {
+                        drv_path: Arc::new(SingleDerivedPath::Opaque(dep_drv_path.clone())),
+                        output: out_name,
+                    });
                 }
             }
         }
@@ -226,6 +244,7 @@ fn main() -> anyhow::Result<()> {
                 &members_by_unit,
                 &output_name_of_stub,
                 &drv_path_by_unit,
+                &solo_output_name,
             ))
         ));
     }
@@ -270,12 +289,12 @@ fn main() -> anyhow::Result<()> {
         let u = &unit_of[p];
         if let Some(dep_drv_path) = drv_path_by_unit.get(u) {
             let is_dep_solo = members_by_unit[u].len() == 1;
-            let out = if is_dep_solo {
-                "out".to_string()
+            let out_name = if is_dep_solo {
+                solo_output_name.get(u).cloned().or_else(|| "out".parse().ok())
             } else {
-                output_name_of_stub[p].clone()
+                output_name_of_stub[p].parse().ok()
             };
-            if let Ok(out_name) = out.parse::<OutputName>() {
+            if let Some(out_name) = out_name {
                 final_drv.inputs.insert(SingleDerivedPath::Built {
                     drv_path: Arc::new(SingleDerivedPath::Opaque(dep_drv_path.clone())),
                     output: out_name,
@@ -297,14 +316,19 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn output_name_for_cross_ref(
+    dep_unit: &str,
     dep_members: &[String],
     dep_stub_path: &str,
     output_name_of_stub: &HashMap<String, String>,
-) -> String {
+    solo_output_name: &HashMap<String, OutputName>,
+) -> Option<OutputName> {
     if dep_members.len() == 1 {
-        "out".to_string()
+        solo_output_name
+            .get(dep_unit)
+            .cloned()
+            .or_else(|| "out".parse().ok())
     } else {
-        output_name_of_stub[dep_stub_path].clone()
+        output_name_of_stub[dep_stub_path].parse().ok()
     }
 }
 
@@ -314,16 +338,19 @@ fn placeholder_for_stub(
     members_by_unit: &HashMap<String, Vec<String>>,
     output_name_of_stub: &HashMap<String, String>,
     drv_path_by_unit: &HashMap<String, StorePath>,
+    solo_output_name: &HashMap<String, OutputName>,
 ) -> String {
     let u = &unit_of[p];
     let drv_path = &drv_path_by_unit[u];
     let is_solo = members_by_unit[u].len() == 1;
-    let out_name_str = if is_solo {
-        "out".to_string()
+    let out_name: OutputName = if is_solo {
+        solo_output_name
+            .get(u)
+            .cloned()
+            .unwrap_or_else(|| "out".parse().unwrap())
     } else {
-        output_name_of_stub[p].clone()
+        output_name_of_stub[p].parse().unwrap()
     };
-    let out_name: OutputName = out_name_str.parse().unwrap();
     Placeholder::ca_output(drv_path, &out_name)
         .render()
         .display()

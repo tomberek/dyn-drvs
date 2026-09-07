@@ -2,6 +2,7 @@ pub mod cc;
 pub mod collect;
 pub mod drv;
 pub mod drv_thunk;
+pub mod group;
 pub mod mode;
 pub mod record;
 pub mod render;

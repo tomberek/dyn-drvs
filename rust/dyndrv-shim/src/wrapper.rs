@@ -265,31 +265,42 @@ fn stage_tree(paths: &[String]) -> anyhow::Result<PathBuf> {
 /// funnel into this once a `Decision::Defer` is known, so the
 /// per-`DyndrvMode` branching lives in exactly one place.
 ///
-/// `DyndrvMode::Sandbox`'s own branch splits further: a record that's
-/// both KEYLESS (file-granularity, the common default -- see
-/// `mkAcceleratedStdenv.nix`'s own header comment on `granularity`) AND
-/// has no dependency on an still-pending TEXT stub registers EAGERLY
-/// (task #85) via the SAME `record_to_derivation`/`add_drv_to_store`
-/// path `Rpc` mode already uses -- legal inside a `builder-rpc-v0`
-/// sandbox (`AddToStore*` is allowlisted there, only `BuildPaths`/
-/// realization is restricted, confirmed by `phases/split.nix`'s own
-/// header). Everything else stays on the OLD deferred-JSON-record path
-/// (`finalize_defer`).
+/// `DyndrvMode::Sandbox`'s own branch splits three ways, based on
+/// `record.key` and whether any dependency is still a pending TEXT
+/// stub (`record_has_pending_text_stub_dep`):
+/// - KEYLESS + no pending text-stub dep (file-granularity, the common
+///   default): registers EAGERLY (task #85) via `record_to_derivation`/
+///   `add_drv_to_store`, symlinking the caller-visible output at the
+///   result -- legal inside a `builder-rpc-v0` sandbox (`AddToStore*`
+///   is allowlisted there, only `BuildPaths`/realization is
+///   restricted, confirmed by `phases/split.nix`'s own header).
+/// - KEYED (`granularity = "module"`, this record's own source path
+///   satisfies the caller's `shouldBatch`) + no pending text-stub dep:
+///   accumulates EAGERLY into its own batch group's growing multi-
+///   output derivation (task #86, `group::accumulate_and_register`),
+///   symlinking the caller-visible output at the group's CURRENT head
+///   with a `#<output-name>` suffix (`stub::read_pending_symlink`'s own
+///   extended format).
+/// - Everything else (any dependency still a pending text stub) stays
+///   on the OLD deferred-JSON-record path (`finalize_defer`).
 ///
 /// The dependency check matters because `ar`/`ranlib` are ALWAYS
 /// keyless themselves (`tonode.rs`'s own decision logic never assigns
 /// either a `key`), regardless of `granularity` -- checking `record.key`
 /// ALONE would wrongly route a `granularity = "module"` build's own
-/// `ar` step onto the eager path even when its `.o` inputs are still
-/// KEYED, text-stub-based batched compiles (module-granularity always
-/// stays on the OLD deferred-JSON collector, task #86's own remaining
-/// scope) -- confirmed by direct reproduction against example 06's
-/// compiled variant: `stub::read_pending_symlink` (eager mode's own
-/// dependency-detection primitive) never matches a TEXT stub, so eager
-/// registration would have silently rendered each `.o` arg as a bogus
-/// LITERAL relative-path string instead of either a real cross-drv edge
-/// or a fallback to the OLD collector. `record_has_pending_text_stub_
-/// dep` below detects this and forces the fallback.
+/// `ar` step onto the file-granularity eager path even when its `.o`
+/// inputs are still KEYED, text-stub-based batched compiles (confirmed
+/// by direct reproduction against example 06's compiled variant, BEFORE
+/// task #86's own group-accumulation path existed: `stub::read_pending_
+/// symlink` never matches a TEXT stub, so eager registration would have
+/// silently rendered each `.o` arg as a bogus LITERAL relative-path
+/// string instead of either a real cross-drv edge or a fallback).
+/// `record_has_pending_text_stub_dep` below detects this and forces the
+/// `finalize_defer` fallback -- this ALSO covers the FIRST compile in a
+/// FRESH batch group correctly (it has no deps at all, so it always
+/// takes the eager group-accumulation branch), and every subsequent
+/// member/consumer once every earlier member in the SAME group has
+/// already switched to the eager symlink representation.
 fn dispatch_defer(
     client: &BuilderRpcClient,
     mode: DyndrvMode,
@@ -297,12 +308,13 @@ fn dispatch_defer(
     record: Record,
 ) -> anyhow::Result<()> {
     match mode {
-        DyndrvMode::Sandbox
-            if record.key.is_none() && !record_has_pending_text_stub_dep(&record) =>
-        {
-            run_sandbox_eager_tail(client, output_path, record)
+        DyndrvMode::Sandbox if record_has_pending_text_stub_dep(&record) => {
+            finalize_defer(output_path, record)
         }
-        DyndrvMode::Sandbox => finalize_defer(output_path, record),
+        DyndrvMode::Sandbox if record.key.is_some() => {
+            run_sandbox_group_tail(client, output_path, record)
+        }
+        DyndrvMode::Sandbox => run_sandbox_eager_tail(client, output_path, record),
         DyndrvMode::Rpc { autoforce } => {
             let drv_name = Path::new(output_path)
                 .file_name()
@@ -329,6 +341,49 @@ fn record_has_pending_text_stub_dep(record: &Record) -> bool {
             .seed_from
             .as_ref()
             .is_some_and(|s| is_text_stub(&s.from))
+}
+
+/// `Sandbox` mode's module-granularity eager tail (task #86): accumulates
+/// this record into its own batch group's growing derivation
+/// (`group::accumulate_and_register`) and symlinks the caller-visible
+/// output at the group's CURRENT head, with a `#<output-name>` suffix
+/// naming this specific member's own output within the (multi-output)
+/// group derivation -- see `group.rs`'s own module doc for the full
+/// mechanism.
+fn run_sandbox_group_tail(
+    client: &BuilderRpcClient,
+    output_path: &str,
+    record: Record,
+) -> anyhow::Result<()> {
+    let key = record
+        .key
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("run_sandbox_group_tail: record has no key"))?;
+
+    let mut deps = std::collections::HashMap::new();
+    for a in record.args.iter().chain(record.seed_from.as_ref().map(|s| &s.from)) {
+        if a == "$out" || a.starts_with('-') {
+            continue;
+        }
+        if let Some(dep) = stub::read_pending_symlink(Path::new(a)) {
+            deps.insert(a.clone(), dep);
+        }
+    }
+
+    let cwd = std::env::current_dir().context("run_sandbox_group_tail: current_dir")?;
+    let workspace = crate::group::resolve_workspace(&cwd);
+    let (head, out_name) =
+        crate::group::accumulate_and_register(client, &workspace, &key, output_path, &record, &deps)
+            .context("run_sandbox_group_tail: accumulate_and_register")?;
+
+    let abs_target = format!("/nix/store/{head}#{out_name}");
+    let output_path = Path::new(output_path);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(output_path);
+    std::os::unix::fs::symlink(&abs_target, output_path)?;
+    Ok(())
 }
 
 /// `Sandbox` mode's eager, file-granularity tail (task #85): registers
@@ -365,10 +420,8 @@ fn run_sandbox_eager_tail(
         if a == "$out" || a.starts_with('-') {
             continue;
         }
-        if let Some(sp) = stub::read_pending_symlink(Path::new(a)) {
-            let out_name: harmonia_store_derivation::derived_path::OutputName =
-                "out".parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            deps.insert(a.clone(), (sp, out_name));
+        if let Some(dep) = stub::read_pending_symlink(Path::new(a)) {
+            deps.insert(a.clone(), dep);
         }
     }
 

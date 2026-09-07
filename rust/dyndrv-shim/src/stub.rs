@@ -33,26 +33,50 @@ pub fn write_batch_stub(output_path: &Path, record_path: &Path) -> std::io::Resu
     )
 }
 
-/// Returns the target `StorePath` if `path` is a symlink into
+/// Returns `(target StorePath, output name)` if `path` is a symlink into
 /// `/nix/store/*.drv`, `None` otherwise -- the OTHER pending-dependency
 /// representation, used by `Rpc` mode's own deferred (no-autoforce)
-/// tail (`rpc_tail.rs`) instead of a text stub, since `Rpc` mode
-/// already has a real, registered `StorePath` in hand at write time
-/// and never runs inside a `builder-rpc-v0` sandbox (confirmed by
-/// direct reproduction, task #83's spike: a store path registered
-/// mid-build is NOT locally `stat`-able from inside the SAME sandbox
-/// that registered it, so this representation only works where the
-/// registering process ISN'T sandboxed -- `Sandbox` mode keeps the
-/// text-stub format for exactly this reason). Never errors on a
-/// missing/non-symlink/real file, matching `read_batch_stub`'s own
-/// `|| true`-equivalent guard.
-pub fn read_pending_symlink(path: &Path) -> Option<harmonia_store_path::StorePath> {
+/// tail (`rpc_tail.rs`) and `Sandbox` mode's own eager tails (tasks
+/// #85/#86) instead of a text stub. `Rpc` mode already has a real,
+/// registered `StorePath` in hand at write time and never runs inside a
+/// `builder-rpc-v0` sandbox; `Sandbox` mode's eager tails CAN register
+/// mid-build (`AddToStore*` is allowlisted there) even though a freshly
+/// registered path is NOT locally `stat`-able from inside the SAME
+/// sandbox that registered it (confirmed by direct reproduction, task
+/// #83's spike) -- callers detect the reference via this function's own
+/// TEXT-only parse (`read_link`, never a real filesystem `stat` on the
+/// target) and confirm validity via a daemon round-trip when needed
+/// (`client.is_valid_path`), not via `read_pending_symlink` itself.
+///
+/// The target's own OUTPUT NAME travels as a `#<name>` suffix on the
+/// symlink text (e.g. `/nix/store/<hash>-dyndrv-batch-vendor.drv#vendor_
+/// lib_a_o`) -- needed because task #86's own module-granularity eager
+/// path registers ONE combined multi-output derivation per batch group,
+/// where each member's own output is named (`output_name_of`'s
+/// sanitized relative path), never `"out"`. Defaults to `"out"` when no
+/// `#` suffix is present, matching every symlink `Rpc` mode and task
+/// #85's own solo-unit eager path already write today (both always
+/// single-output derivations) -- so neither of those existing writers
+/// needs to change.
+pub fn read_pending_symlink(
+    path: &Path,
+) -> Option<(
+    harmonia_store_path::StorePath,
+    harmonia_store_derivation::derived_path::OutputName,
+)> {
     let target = std::fs::read_link(path).ok()?;
-    let rest = target.to_str()?.strip_prefix("/nix/store/")?;
-    if !rest.ends_with(".drv") {
+    let s = target.to_str()?;
+    let rest = s.strip_prefix("/nix/store/")?;
+    let (drv_part, out_part) = match rest.split_once('#') {
+        Some((d, o)) => (d, o),
+        None => (rest, "out"),
+    };
+    if !drv_part.ends_with(".drv") {
         return None;
     }
-    harmonia_store_path::StorePath::from_base_path(rest).ok()
+    let store_path = harmonia_store_path::StorePath::from_base_path(drv_part).ok()?;
+    let out_name: harmonia_store_derivation::derived_path::OutputName = out_part.parse().ok()?;
+    Some((store_path, out_name))
 }
 
 /// True if `path` is ANY pending-dependency representation --

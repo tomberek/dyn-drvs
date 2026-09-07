@@ -1,5 +1,6 @@
 use crate::record::Record;
 use crate::stub;
+use harmonia_store_derivation::derived_path::OutputName;
 use harmonia_store_path::StorePath;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -16,14 +17,20 @@ pub struct Stub {
     pub chain: Vec<Record>,
     pub key: Option<String>,
     pub deps: Vec<String>,
-    /// `Some(drv_path)` for a stub that's a real symlink into
-    /// `/nix/store/*.drv` (`run_sandbox_eager_tail`'s own representation
-    /// for a keyless, file-granularity record) -- its derivation is
-    /// ALREADY registered, so Phase 7 (`dyndrv-collect.rs`) must skip
-    /// building/registering a NEW one for it and reuse this `StorePath`
-    /// directly. `None` for an ordinary text-stub (the ONLY kind before
-    /// task #85), which still needs the full render+register pass.
-    pub eager_drv: Option<StorePath>,
+    /// `Some((drv_path, output_name))` for a stub that's a real symlink
+    /// into `/nix/store/*.drv` (`run_sandbox_eager_tail`'s own
+    /// file-granularity representation, or task #86's own module-
+    /// granularity group-accumulation representation) -- its derivation
+    /// is ALREADY registered, so Phase 7 (`dyndrv-collect.rs`) must skip
+    /// building/registering a NEW one for it and reuse this `StorePath`/
+    /// `OutputName` directly. `output_name` is `"out"` for a solo eager
+    /// stub (task #85's own representation, always single-output) but
+    /// may be any sanitized-relative-path name for a GROUP member (task
+    /// #86: one combined multi-output derivation per batch group, each
+    /// member owning its own named output within it). `None` for an
+    /// ordinary text-stub (the ONLY kind before task #85), which still
+    /// needs the full render+register pass.
+    pub eager_drv: Option<(StorePath, OutputName)>,
 }
 
 /// Walks a HEAD record's own `chainedFrom` pointer back to every earlier
@@ -114,7 +121,7 @@ pub fn output_name_of(rel_path: &str) -> String {
 /// solo derivation) can ever be.
 pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
     let mut chains: BTreeMap<String, Vec<Record>> = BTreeMap::new();
-    let mut eager: BTreeMap<String, StorePath> = BTreeMap::new();
+    let mut eager: BTreeMap<String, (StorePath, OutputName)> = BTreeMap::new();
     let mut is_stub = HashSet::new();
 
     for entry in walk_files(build_root) {
@@ -127,9 +134,9 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
             let head = read_record(&record_path);
             is_stub.insert(rel.clone());
             chains.insert(rel, record_chain(head));
-        } else if let Some(drv_path) = stub::read_pending_symlink(&entry) {
+        } else if let Some(dep) = stub::read_pending_symlink(&entry) {
             is_stub.insert(rel.clone());
-            eager.insert(rel, drv_path);
+            eager.insert(rel, dep);
         }
     }
 
@@ -157,14 +164,14 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
             },
         );
     }
-    for (rel, drv_path) in eager {
+    for (rel, dep) in eager {
         stubs.insert(
             rel,
             Stub {
                 chain: Vec::new(),
                 key: None,
                 deps: Vec::new(),
-                eager_drv: Some(drv_path),
+                eager_drv: Some(dep),
             },
         );
     }

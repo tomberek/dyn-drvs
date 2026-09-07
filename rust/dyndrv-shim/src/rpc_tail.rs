@@ -39,10 +39,8 @@ pub fn run_rpc_tail(
         if a == "$out" || a.starts_with('-') {
             continue;
         }
-        if let Some(sp) = stub::read_pending_symlink(Path::new(a)) {
-            let out_name: harmonia_store_derivation::derived_path::OutputName =
-                "out".parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
-            deps.insert(a.clone(), (sp, out_name));
+        if let Some(dep) = stub::read_pending_symlink(Path::new(a)) {
+            deps.insert(a.clone(), dep);
         }
     }
 
