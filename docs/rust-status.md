@@ -368,6 +368,69 @@ for the original design). Summary:
   not a Nix derivation, since `Thunk` mode's whole design point is
   working outside any sandbox).
 
+## Symlink-IR redesign: `Sandbox` mode's file-granularity path (task #85)
+
+`Sandbox` mode's file-granularity (`granularity = "file"`, the
+default) path is redesigned per the plan referenced above: a keyless
+record with no dependency on a still-pending TEXT stub now registers
+its own derivation EAGERLY (`add_drv_to_store`, legal inside a
+`builder-rpc-v0` sandbox — only `BuildPaths`/realization is
+restricted there) and symlinks the caller-visible output straight at
+the registered `.drv`'s real store path — the SAME representation
+`Rpc` mode's own non-autoforce tail already uses (`stub::
+read_pending_symlink`), instead of a JSON-record text stub.
+
+- **`dyndrv-collect`'s own discovery/Phase 7 needed two fixes** to see
+  these eager symlinks at all: `collect::discover_stubs` only ever
+  looked for text stubs (now also matches `read_pending_symlink`,
+  carrying the resolved `StorePath` on a new `Stub::eager_drv` field);
+  `walk_files` used `path.is_file()`/`is_dir()`, which FOLLOW symlinks
+  — a freshly-registered store path isn't locally `stat`-able from
+  inside the SAME sandbox that registered it (task #83's own spike),
+  so every eager stub was silently invisible to directory discovery.
+  Fixed via `DirEntry::file_type()` (no dereference), treating a
+  symlink entry as a discovered stub outright. Phase 7 now reuses an
+  eager stub's own already-registered `StorePath` instead of
+  re-rendering/re-registering it.
+- **Real correctness bug found and fixed along the way**: `ranlib_to_
+  node` overwrote the archive's own argv slot with `"$out"` BEFORE any
+  caller ever scanned for dependencies, so a standalone (non-chained)
+  `ranlib`'s registered derivation always ended up with ZERO
+  `inputDrvs` — confirmed via `nix derivation show`:
+  `"inputs":{"drvs":{}}`. `ranlib` would silently run against an empty
+  `$out` instead of the real archive, rather than failing loudly. This
+  affected every ALREADY-COMMITTED eager tail sharing this decision
+  logic (`Rpc` mode, `Thunk{Drv}` mode too), not just the new `Sandbox`
+  path. Fixed by giving `Record` a new `seed_from` field (a
+  `SeedFrom{from, coreutils_basename}` pair) that `ranlib_to_node`
+  populates instead of building its own `setup_cmd` string directly;
+  every render layer (`drv.rs`, `drv_thunk.rs`, `thunk.rs`, `render.rs`)
+  now resolves it the same way it resolves an `args` element (via the
+  `deps` map if still unresolved, else literal already-real text) and
+  emits the seeding `cp`+`chmod` command with a real `inputDrvs` edge
+  wired in when applicable.
+- **A second real bug found and fixed**: `dispatch_defer`'s original
+  eager/deferred split checked `record.key.is_none()` alone — but
+  `ar`/`ranlib` are ALWAYS keyless regardless of `granularity`, so a
+  `granularity = "module"` build's own `ar` step would have been
+  wrongly routed onto the new eager path even when its `.o` inputs are
+  still KEYED, text-stub-based batched compiles (module-granularity
+  stays entirely on the OLD deferred-JSON collector, task #86's own
+  scope). Fixed by also checking whether any dependency (`args` or
+  `seed_from`) is currently a pending TEXT stub, forcing the old
+  collector fallback in that case.
+- **Verified end-to-end**: example 05's compiled variant (three eager
+  compiles + a link step, no `ar`) builds and the resulting `prog`
+  prints the correct sum; a real `cc`+`ar`+`ranlib` chain under the new
+  eager path registers `ranlib` with a genuine `inputDrvs` edge to
+  `ar`'s own derivation and a correct `cp`-seeded script — realizing it
+  produces a genuinely valid archive (confirmed via `ar t`/`ar p`, not
+  just "the build succeeded"). Existing fixtures re-verified unchanged:
+  `ar-integration-test`, `collect-integration-test` (both still
+  text-stub-only), example 06's compiled module-granularity variant
+  (correctly still falls back to the old collector, correct program
+  output), and the `Thunk{Drv}` multi-node fixture.
+
 ## What's still follow-on work
 
 - Batching across the transitive thunk graph for `Thunk { format: Nix
@@ -382,8 +445,8 @@ for the original design). Summary:
   fixed along the way, switching the placeholder to `/build/dyndrv-
   placeholder-out`).
 - The symlink-based intermediate-representation redesign for `Sandbox`
-  mode's file- and module-granularity paths (see the design's own plan
-  file) is still open — Design B (daemon `IsValidPath`, per the spike
-  finding above) needs that primitive added to `nix-builder-rpc-client`
-  first; `Rpc` mode's own half of this redesign is done (real symlinks
-  instead of a text stub).
+  mode's MODULE-granularity path (`granularity = "module"`) is still
+  open (task #86) — today it stays entirely on the old deferred-JSON
+  collector; the plan's own proposed "group-state file" incremental-
+  accumulation mechanism is unimplemented, and its core "byte-identical
+  to today's collector" claim is unverified.
