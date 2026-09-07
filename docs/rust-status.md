@@ -75,6 +75,65 @@ not a separately-maintained equivalence test (nixgg's own
 sandbox code paths are NOT unified this way), a structural property of
 sharing one construction path.
 
+## Cross-mode substitution, verified against a REAL project
+
+The claim above was only ever checked via a synthetic `Record` diff.
+`example/` (a small, real, checked-in C++ project — `main.cc`/`util.cc`/
+`util.h`/`Makefile`, building `hello`) plus a new permanent fixture,
+`rust/dyndrv-shim/devshell-parity-test.sh`, make it directly checkable
+against genuine `make` output instead:
+
+- Run `make` through `nix/lib/shim/devShell.nix`'s own `Rpc`-mode
+  wrappers (no sandbox, no autoforce — just registration) against
+  `example/`'s real sources, capture the resulting `main.o`/`util.o`
+  symlinks' own `.drv` targets.
+- Separately build `try-it-out/examples/08-accelerate-example-dir.nix`
+  (the same sources wrapped with `dyndrv.accelerate.mkAcceleratedStdenv`,
+  a real sandboxed `builder-rpc-v0` build) via `try-it-out/run-nix.sh`.
+- Confirm the sandboxed build's own alt store contains those EXACT SAME
+  `main.o.drv`/`util.o.drv` paths (`nix path-info`, a direct store
+  lookup, not an inference from "both builds succeeded") — **confirmed
+  true**: both paths registered byte-identical derivations for the
+  identical logical compile.
+- Confirm both sides' own final `hello` binary produces identical,
+  correct output (`Hello from nixgg:3`).
+
+**A genuine, previously-undetected bug found along the way**: this was
+the first C++ project ever exercised through `mkAcceleratedStdenv`/
+`devShell.nix` (every prior example used plain C) — and it immediately
+surfaced that C++ builds were never actually being accelerated at all.
+nixpkgs' own `gcc-wrapper` setup hook unconditionally exports
+`CXX=g++` (the real compiler's bare name), running AFTER this codebase's
+own `env.CXX = "${wrapperDir}/bin/cc"` override is already set — setup
+hooks run at the START of a sandboxed build, before `buildPhase`, so the
+override was silently clobbered the moment any C++ TU's build actually
+ran, falling through to the real, unshimmed `g++` on `$PATH` instead
+(never registering a dynamic derivation for the link step at all).
+Separately confirmed that simply reusing the existing `cc`-only shim for
+C++ wouldn't have worked either way: `stdenv.cc` provides `cc`/`c++` as
+genuinely DIFFERENT binaries (linking a C++ `.o` via plain `cc` fails
+outright — `"undefined reference to `std::cout'"` — without `-lstdc++`,
+which only `c++`'s own wrapper adds by default). Fixed by adding a
+SEPARATE `cxxShim` (same `command = "cc"` dispatch, just `realCommand`
+pointed at the real `c++`) to both `mkAcceleratedStdenv.nix` and
+`devShell.nix`, installed under `c++`/`g++` mirroring the existing
+`cc`/`gcc` pair exactly.
+
+The link step's own `.drv` is NOT expected to (and does not) match
+byte-for-byte between the two paths — `Rpc` mode wires real `Built`
+`inputDrvs` edges to `main.o.drv`/`util.o.drv` via CA placeholders,
+while `Sandbox` mode's own per-unit render resolves the SAME
+cross-references to literal `Opaque` store-path text instead (a
+pre-existing, unrelated difference in how each mode's own final-node
+construction resolves a dependency reference — not a bug, and not
+something this check claims should match). Only the REAL translation
+units (`main.o`, `util.o`) are expected to be byte-identical, and are.
+Curiously, Nix's own CA-derivation resolution mechanism still resolves
+BOTH differently-shaped `hello.drv`s to the exact same final realized
+output path when actually built — confirmed by direct reproduction, not
+required by this fixture's own assertions, but a reassuring sign of just
+how much further this substitution property extends in practice.
+
 ## Experimental finding: a `.drv` file needs `nix-store --add` before
 ## it can be realized (task #65)
 
