@@ -1,5 +1,6 @@
 use crate::drv::record_to_derivation;
 use crate::record::Record;
+use crate::stub;
 use harmonia_store_derivation::derived_path::SingleDerivedPath;
 use harmonia_store_path::StoreDir;
 use nix_builder_rpc_client::BuilderRpcClient;
@@ -22,7 +23,30 @@ pub fn run_rpc_tail(
     autoforce: bool,
 ) -> anyhow::Result<()> {
     let store_dir = StoreDir::default();
-    let drv = record_to_derivation(&record, drv_name)?;
+
+    // Scan this record's own `args` for positional elements that are
+    // ACTUALLY symlinks into `/nix/store/*.drv` -- an EARLIER,
+    // already-registered (but not yet realized) invocation's own drv,
+    // e.g. `ar`'s own `.o` args when they're still deferred symlinks
+    // rather than real, promoted files (the norm without `autoforce`).
+    // Each match becomes a real `SingleDerivedPath::Built` `inputDrvs`
+    // edge in the derivation `record_to_derivation` builds below --
+    // confirmed necessary by direct reproduction: without this, a
+    // deferred `ar` step never declared its own `.o` inputs' owning
+    // derivations as real dependencies at all.
+    let mut deps = std::collections::HashMap::new();
+    for a in &record.args {
+        if a == "$out" || a.starts_with('-') {
+            continue;
+        }
+        if let Some(sp) = stub::read_pending_symlink(Path::new(a)) {
+            let out_name: harmonia_store_derivation::derived_path::OutputName =
+                "out".parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            deps.insert(a.clone(), (sp, out_name));
+        }
+    }
+
+    let drv = record_to_derivation(&record, drv_name, &deps)?;
     let drv_path = client.add_drv_to_store(&store_dir, &drv)?;
 
     if autoforce {

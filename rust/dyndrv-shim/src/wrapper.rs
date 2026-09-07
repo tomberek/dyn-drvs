@@ -264,6 +264,21 @@ fn stage_tree(paths: &[String]) -> anyhow::Result<PathBuf> {
 /// Shared tail dispatch -- both `run_plain` and `run_discover_tree`
 /// funnel into this once a `Decision::Defer` is known, so the
 /// per-`DyndrvMode` branching lives in exactly one place.
+///
+/// `DyndrvMode::Sandbox`'s own branch splits further on `record.key`:
+/// a KEYLESS record (file-granularity, the common default -- see
+/// `mkAcceleratedStdenv.nix`'s own header comment on `granularity`)
+/// registers EAGERLY (task #85) via the SAME `record_to_derivation`/
+/// `add_drv_to_store` path `Rpc` mode already uses -- legal inside a
+/// `builder-rpc-v0` sandbox (`AddToStore*` is allowlisted there, only
+/// `BuildPaths`/realization is restricted, confirmed by `phases/
+/// split.nix`'s own header). A KEYED record (`granularity = "module"`,
+/// where multiple compiles must accumulate into ONE combined derivation
+/// before any of them can finalize) stays on the OLD deferred-JSON-
+/// record path (`finalize_defer`) unchanged -- eager registration has
+/// no way to know "this compile is done accumulating its own batch
+/// group" at the moment any SINGLE compile runs, so that case still
+/// needs `dyndrv-collect`'s own end-of-build merge pass.
 fn dispatch_defer(
     client: &BuilderRpcClient,
     mode: DyndrvMode,
@@ -271,6 +286,9 @@ fn dispatch_defer(
     record: Record,
 ) -> anyhow::Result<()> {
     match mode {
+        DyndrvMode::Sandbox if record.key.is_none() => {
+            run_sandbox_eager_tail(client, output_path, record)
+        }
         DyndrvMode::Sandbox => finalize_defer(output_path, record),
         DyndrvMode::Rpc { autoforce } => {
             let drv_name = Path::new(output_path)
@@ -283,6 +301,66 @@ fn dispatch_defer(
             run_thunk_tail(client, output_path, record, format, autoforce)
         }
     }
+}
+
+/// `Sandbox` mode's eager, file-granularity tail (task #85): registers
+/// the record's derivation immediately, EXACTLY like `Rpc` mode's own
+/// non-autoforce path (`rpc_tail::run_rpc_tail`) -- `autoforce` is
+/// never available here (`builder-rpc-v0`'s own opcode allowlist has no
+/// `BuildPaths`, so a sandboxed connection can never realize inline,
+/// confirmed by `phases/split.nix`'s own header comment) -- then
+/// symlinks the caller-visible output at the registered `.drv`'s real
+/// store path.
+///
+/// Confirmed by direct reproduction (task #83's own spike): a path
+/// registered via `add_drv_to_store` mid-build is NOT locally
+/// `stat`-able from inside the SAME sandbox that registered it -- this
+/// means the symlink written here is genuinely UNRESOLVABLE by a LATER
+/// invocation in the same sandboxed build via a plain filesystem check.
+/// Dependency detection for a LATER invocation's own argv (e.g. `ar`
+/// reading this compile's own `.o` output) therefore uses
+/// `stub::read_pending_symlink` (which only needs the symlink's TARGET
+/// TEXT, not the target's own existence) to discover the reference,
+/// then `client.is_valid_path` (a real daemon round-trip, task #85's
+/// own `is_valid_path` addition to `nix-builder-rpc-client`) to confirm
+/// it before trusting it -- see `rewrite_argv_element`'s own updated
+/// logic.
+fn run_sandbox_eager_tail(
+    client: &BuilderRpcClient,
+    output_path: &str,
+    record: Record,
+) -> anyhow::Result<()> {
+    let store_dir = harmonia_store_path::StoreDir::default();
+
+    let mut deps = std::collections::HashMap::new();
+    for a in &record.args {
+        if a == "$out" || a.starts_with('-') {
+            continue;
+        }
+        if let Some(sp) = stub::read_pending_symlink(Path::new(a)) {
+            let out_name: harmonia_store_derivation::derived_path::OutputName =
+                "out".parse().map_err(|e| anyhow::anyhow!("{e:?}"))?;
+            deps.insert(a.clone(), (sp, out_name));
+        }
+    }
+
+    let drv_name = Path::new(output_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| output_path.to_string());
+    let drv = crate::drv::record_to_derivation(&record, &drv_name, &deps)?;
+    let drv_path = client
+        .add_drv_to_store(&store_dir, &drv)
+        .context("run_sandbox_eager_tail: add_drv_to_store")?;
+
+    let abs_drv_path = format!("/nix/store/{drv_path}");
+    let output_path = Path::new(output_path);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(output_path);
+    std::os::unix::fs::symlink(&abs_drv_path, output_path)?;
+    Ok(())
 }
 
 /// Any argv element that's a path to an existing REGULAR file, not

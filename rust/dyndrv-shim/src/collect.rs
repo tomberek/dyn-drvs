@@ -1,17 +1,29 @@
 use crate::record::Record;
 use crate::stub;
+use harmonia_store_path::StorePath;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 /// A discovered stub, keyed by its path relative to `buildRoot` -- port
-/// of `collectStubs.nix`'s Phase 1/2 discovery + dependency-scan.
+/// of `collectStubs.nix`'s Phase 1/2 discovery + dependency-scan, plus
+/// (task #85) `Sandbox` mode's own eager file-granularity representation.
 pub struct Stub {
     /// Full record chain, OLDEST first (see `Record.chained_from`'s own
     /// doc comment -- an `ar` step chained under a later `ranlib` step
-    /// must still render both, in order).
+    /// must still render both, in order). Empty for an eager stub (see
+    /// `eager_drv` below) -- there's no on-disk record to chain, since
+    /// `run_sandbox_eager_tail` never wrote one.
     pub chain: Vec<Record>,
     pub key: Option<String>,
     pub deps: Vec<String>,
+    /// `Some(drv_path)` for a stub that's a real symlink into
+    /// `/nix/store/*.drv` (`run_sandbox_eager_tail`'s own representation
+    /// for a keyless, file-granularity record) -- its derivation is
+    /// ALREADY registered, so Phase 7 (`dyndrv-collect.rs`) must skip
+    /// building/registering a NEW one for it and reuse this `StorePath`
+    /// directly. `None` for an ordinary text-stub (the ONLY kind before
+    /// task #85), which still needs the full render+register pass.
+    pub eager_drv: Option<StorePath>,
 }
 
 /// Walks a HEAD record's own `chainedFrom` pointer back to every earlier
@@ -82,9 +94,26 @@ pub fn output_name_of(rel_path: &str) -> String {
 }
 
 /// Discovers every batch-pending stub under `build_root`, returning
-/// `{ relative_path -> Stub }` -- port of `collectStubs.nix` Phases 1+2.
+/// `{ relative_path -> Stub }` -- port of `collectStubs.nix` Phases 1+2,
+/// extended (task #85) to also discover `Sandbox` mode's own eager
+/// file-granularity representation: a real symlink into `/nix/store/
+/// *.drv`, written directly by `run_sandbox_eager_tail` with NO on-disk
+/// JSON record at all (unlike a text stub, whose whole POINT is that a
+/// record still needs re-reading for chaining/merge). An eager stub's
+/// `deps` are computed the SAME way a text stub's cross-references are
+/// (scanning for other discovered stub paths as substrings of a plain
+/// positional arg) -- but since there's no record to scan args from,
+/// scanning ISN'T needed: `run_sandbox_eager_tail` already resolved and
+/// wired every dependency into the derivation itself at write time.
+/// `deps` stays empty for an eager stub; correctness doesn't need it
+/// here since eager stubs never enter Phase 4's merge rule (see
+/// `assign_units`' own doc comment) -- a keyless record only joins a
+/// dependency's unit if that dependency is itself a MERGEABLE
+/// (non-solo) unit, which no eager stub (always registered as its own
+/// solo derivation) can ever be.
 pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
     let mut chains: BTreeMap<String, Vec<Record>> = BTreeMap::new();
+    let mut eager: BTreeMap<String, StorePath> = BTreeMap::new();
     let mut is_stub = HashSet::new();
 
     for entry in walk_files(build_root) {
@@ -97,6 +126,9 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
             let head = read_record(&record_path);
             is_stub.insert(rel.clone());
             chains.insert(rel, record_chain(head));
+        } else if let Some(drv_path) = stub::read_pending_symlink(&entry) {
+            is_stub.insert(rel.clone());
+            eager.insert(rel, drv_path);
         }
     }
 
@@ -114,7 +146,26 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
                 }
             }
         }
-        stubs.insert(rel, Stub { chain, key, deps });
+        stubs.insert(
+            rel,
+            Stub {
+                chain,
+                key,
+                deps,
+                eager_drv: None,
+            },
+        );
+    }
+    for (rel, drv_path) in eager {
+        stubs.insert(
+            rel,
+            Stub {
+                chain: Vec::new(),
+                key: None,
+                deps: Vec::new(),
+                eager_drv: Some(drv_path),
+            },
+        );
     }
 
     stubs
@@ -129,9 +180,29 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `DirEntry::file_type()` reports the entry's OWN type (no
+            // extra syscall following the link), unlike `path.is_dir()`/
+            // `is_file()` (which call `fs::metadata`, following
+            // symlinks) -- confirmed necessary by direct reproduction:
+            // an eager stub (task #85's `run_sandbox_eager_tail`) is a
+            // symlink into `/nix/store/*.drv`, and a store path
+            // registered mid-build is NOT locally `stat`-able from
+            // inside the SAME sandbox that registered it (task #83's
+            // spike), so `path.is_file()` on it returns `false` and the
+            // ORIGINAL `is_dir()`/`is_file()`-only version silently
+            // dropped every eager stub from discovery entirely --
+            // confirmed by direct reproduction against example 05's
+            // compiled variant: `prog`'s own final tree never got
+            // `main.o`/`lib_a.o`/`lib_b.o` copied in, "cp: cannot stat
+            // 'prog': No such file or directory".
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                out.push(path);
+            } else if file_type.is_dir() {
                 queue.push(path);
-            } else if path.is_file() {
+            } else if file_type.is_file() {
                 out.push(path);
             }
         }

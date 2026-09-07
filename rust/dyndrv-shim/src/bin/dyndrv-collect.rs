@@ -79,6 +79,21 @@ fn main() -> anyhow::Result<()> {
         let members = &members_by_unit[u];
         let is_solo = members.len() == 1;
 
+        // An eager stub (task #85: `Sandbox` mode's file-granularity
+        // path, `run_sandbox_eager_tail`) is ALREADY a registered
+        // derivation -- `assign_units` always places it alone in its
+        // own solo unit (it has no `key` and no `deps` to join a
+        // dependency's unit through, see `discover_stubs`' own doc
+        // comment), so `is_solo` here always holds for it. Reuse its
+        // known `StorePath` directly instead of rendering+registering a
+        // redundant new derivation for the same content.
+        if is_solo {
+            if let Some(drv_path) = stubs[&members[0]].eager_drv.clone() {
+                drv_path_by_unit.insert(u.clone(), drv_path);
+                continue;
+            }
+        }
+
         let unit_render = render_unit(
             members,
             &stubs,
