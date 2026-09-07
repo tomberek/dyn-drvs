@@ -506,19 +506,57 @@ compile.
   result as the old collector's single end-of-build merge, for this
   representative case.
 
+## `Thunk{Nix}`'s multi-thunk graph: built, verified (task #90)
+
+`Thunk{format: Nix}`'s own autoforce path only ever handled a single
+thunk. Now resolved, mirroring `Thunk{Drv}`'s own multi-node story
+(tasks #77-82) but structurally simpler:
+
+- **Verified first, not assumed**: a throwaway two-derivation spike
+  confirmed a plain Nix `${import ./dep.nix}` interpolation inside a
+  builder script is sufficient — `nix build --file` on a thunk that
+  imports another correctly builds BOTH derivations in one call. No
+  separate registration-tree walk is needed the way `Thunk{Drv}` mode's
+  own `register_drv_tree` requires — a raw `.drv` file has no
+  `import`-equivalent mechanism of its own; a Nix expression does,
+  natively.
+- **`thunk::resolve_nix_thunk_dependency`** mirrors `drv_thunk::
+  resolve_drv_thunk_dependency`'s own "check the target symlink's
+  parent directory name" convention, for `.dyndrv/thunks/` instead of
+  `.dyndrv/thunks-drv/`. `record_to_thunk_expr` now takes a `deps` map
+  and substitutes a real `${import <path>}` interpolation for any
+  `args`/`seed_from` reference that resolves to an earlier thunk in the
+  same graph.
+- **Real bug found and fixed along the way**: the original single
+  blanket string-escape pass ran over the WHOLE script, including the
+  newly-inserted `${import ...}` syntax itself — escaping its own `$`
+  into `\$`, which Nix never expands, so the derivation's script
+  contained the LITERAL text `${import ./dep.nix}` instead of the
+  dependency's real path, and the builder's own `/bin/sh` failed with
+  "bad substitution." Fixed with a `NixStringBuilder` that tracks
+  literal vs. interpolation segments separately, only escaping the
+  literal ones.
+- **A second, previously-latent bug found and fixed**: `stub::is_
+  pending` never recognized a `Thunk{Nix}` symlink (`.dyndrv/thunks/
+  *.nix`) at all — only `Thunk{Drv}`'s own `.dyndrv/thunks-drv/`
+  sibling. Without this, `rewrite_argv_element` would have staged a
+  `.nix` thunk symlink's own literal Nix-expression TEXT as if it were
+  real object content, corrupting a dependent's script — the same shape
+  of bug task #78 found for `Thunk{Drv}` mode, just never checked for
+  this mode until now.
+- **Verified end-to-end** with a new permanent regression fixture,
+  `rust/dyndrv-shim/thunk-nix-multinode-test.sh` (mirrors `drv-thunk-
+  multinode-test.sh`'s own structure): two deferred `.nix`-thunk
+  compiles, `DYNDRV_AUTOFORCE=1` on just the archive step correctly
+  realizes the whole graph via one `nix build --file` call, confirmed
+  via the archive's own rendered thunk containing 2 real `${import
+  ...}` references (not empty/literal text), and the resulting `liba.a`
+  links and runs correctly (11+22=33). Existing `Thunk{Drv}` fixture,
+  `ar-integration-test`, `collect-integration-test`, and examples 05/06
+  all re-verified unchanged.
+
 ## What's still follow-on work
 
-- Batching across the transitive thunk graph for `Thunk { format: Nix
-  }`'s own autoforce path (nixgg's own `realise.Realise`) is unbuilt —
-  only the single-thunk case works today.
-- Re-measuring `real-package-patch-rebuild.sh`/
-  `real-package-version-bump.sh` against the compiled path and updating
-  `BASELINE.md` accordingly is still open (unblocked now — see
-  `BASELINE.md`'s own "Real bug found and fixed while attempting the
-  compiled-shim re-measurement" section for the `phases.split`
-  `/nonexistent`-unwritable-in-a-real-sandbox bug this attempt found and
-  fixed along the way, switching the placeholder to `/build/dyndrv-
-  placeholder-out`).
 - No new eager-mode-specific Nix-level regression fixture exists yet
   for `granularity = "module"` (example 06's compiled variant is the
   only current coverage) — a dedicated `dyndrv-shim`-crate-level
