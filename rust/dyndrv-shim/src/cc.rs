@@ -224,6 +224,7 @@ pub fn cc_to_node(
         srcs,
         setup_cmd: Some(setup_cmd),
         chained_from: None,
+        seed_from: None,
     };
 
     if out_idx != -1 {

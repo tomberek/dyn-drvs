@@ -35,7 +35,7 @@ pub fn run_rpc_tail(
     // deferred `ar` step never declared its own `.o` inputs' owning
     // derivations as real dependencies at all.
     let mut deps = std::collections::HashMap::new();
-    for a in &record.args {
+    for a in record.args.iter().chain(record.seed_from.as_ref().map(|s| &s.from)) {
         if a == "$out" || a.starts_with('-') {
             continue;
         }

@@ -1,4 +1,4 @@
-use crate::record::Record;
+use crate::record::{Record, SeedFrom};
 
 /// Result of a `toNode`-equivalent decision: either a real invocation to
 /// pass through unmodified (`Passthrough`), or a deferred record plus
@@ -78,6 +78,7 @@ pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str) -> De
             srcs,
             setup_cmd: None,
             chained_from: None,
+            seed_from: None,
         },
         output_arg: Some(1),
         output_path: None,
@@ -89,22 +90,26 @@ pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str) -> De
 /// output -- indexes an archive in place.
 ///
 /// `argv[archive_idx]` (BEFORE being overwritten with the `"$out"`
-/// sentinel below) is the archive's own real store path -- already
-/// rewritten there by `wrapper::rewrite_argv_element` before this
-/// function ever sees it. A standalone `ranlib` invocation (no
-/// preceding `ar` step in the SAME unit -- the norm outside `Sandbox`
-/// mode, since `Rpc`/`Thunk` never chain records the way `finalize_
-/// defer`'s `chainedFrom` does) needs a `setup_cmd` seeding `$out`
-/// with that real content BEFORE running `ranlib` on it, or `$out`
-/// starts empty and `ranlib` fails with "No such file" -- confirmed by
-/// direct reproduction against a real `nix develop`-style `Rpc`-mode
-/// devShell session: `ar cr liba.a a.o; ranlib liba.a` as two
-/// independent, non-chained invocations left `ranlib`'s own registered
-/// derivation running `ranlib $out;` with nothing ever populating
-/// `$out` at all. Mirrors `cc`'s own `setup_cmd` convention (`cp -r
-/// <tree>/. . && chmod -R u+w . &&`) — same "prepare real content
-/// before the tool runs" shape, just a single-file `cp` instead of a
-/// tree copy.
+/// sentinel below) names the archive -- either an already-real
+/// `/nix/store/...` path (rewritten there by `wrapper::rewrite_argv_
+/// element` before this function ever sees it, the common case outside
+/// `Sandbox` mode) or an UNRESOLVED dependency reference (a still-
+/// pending stub/symlink -- e.g. `Sandbox` mode's own eager path, task
+/// #85, where `ar`'s own output is a symlink into a store path that
+/// isn't locally `stat`-able yet, or `Sandbox` mode's OLD chainedFrom
+/// path, which never rewrites at all). Recorded here via `seed_from`
+/// (NOT folded into `args`/`setup_cmd` directly) so each render layer
+/// (`render.rs`/`drv.rs`/`drv_thunk.rs`) can resolve it the SAME way it
+/// already resolves any other `args` dependency reference -- confirmed
+/// necessary by direct reproduction: the ORIGINAL version here only
+/// ever special-cased an already-`/nix/store/`-prefixed literal path,
+/// silently reducing to a NO-OP `setup_cmd` (`None`) for a standalone,
+/// still-unresolved `ranlib` in `Sandbox`'s new eager mode -- the
+/// resulting registered derivation had `ranlib $out;` with `$out`
+/// completely empty and NO `inputDrvs` edge to the archive's own
+/// derivation at all (confirmed via `nix derivation show`: `"inputs":
+/// {"drvs":{}}`), silently producing a broken empty archive instead of
+/// indexing the real one, rather than failing loudly.
 pub fn ranlib_to_node(
     argv: &[String],
     real_ranlib: &str,
@@ -121,28 +126,18 @@ pub fn ranlib_to_node(
     // The archive's own store path is excluded from `argv[..archive_idx]`
     // above (its argv SLOT is about to be overwritten with `"$out"` in
     // `args_for_ranlib`, so `extra_store_paths` never sees it there) --
-    // but the NEW `setup_cmd` below reads it directly, so it must be
-    // declared as its own `srcs` entry, or the sandboxed derivation
-    // never mounts it at all (confirmed by direct reproduction: `cp:
-    // cannot stat '/nix/store/...-liba.a': No such file or directory`).
-    srcs.extend(extra_store_paths(std::slice::from_ref(&real_archive_path)));
-
-    let setup_cmd = if real_archive_path.starts_with("/nix/store/") {
-        // `chmod u+w` AFTER the `cp`, not before -- mirrors `cc`'s own
-        // `setup_cmd` convention (`cp -r ... && chmod -R u+w . &&`) for
-        // the identical reason: `cp` preserves the read-only Nix store
-        // source's permissions on the destination, so `ranlib` (which
-        // modifies the archive IN PLACE) fails outright without this
-        // ("unable to copy file '...'; reason: Permission denied" --
-        // confirmed by direct reproduction).
-        Some(format!(
-            "/nix/store/{coreutils_basename}/bin/cp {} $out && \
-             /nix/store/{coreutils_basename}/bin/chmod u+w $out && ",
-            crate::render::shell_quote(&real_archive_path)
-        ))
-    } else {
-        None
-    };
+    // but `seed_from`'s own resolved form (see each render layer's own
+    // handling) reads it directly, so it must be declared as its own
+    // `srcs` entry when it's ALREADY a real store path, or the
+    // sandboxed derivation never mounts it at all (confirmed by direct
+    // reproduction: `cp: cannot stat '/nix/store/...-liba.a': No such
+    // file or directory`). A still-unresolved dependency reference
+    // (not yet a `/nix/store/` path) has nothing to declare here --
+    // its OWN owning derivation becomes a real `inputDrvs` edge
+    // instead, wired by whichever render layer resolves it.
+    if real_archive_path.starts_with("/nix/store/") {
+        srcs.extend(extra_store_paths(std::slice::from_ref(&real_archive_path)));
+    }
 
     Decision::Defer {
         record: Record {
@@ -150,8 +145,12 @@ pub fn ranlib_to_node(
             tool: real_ranlib.to_string(),
             args: args_for_ranlib,
             srcs,
-            setup_cmd,
+            setup_cmd: None,
             chained_from: None,
+            seed_from: Some(SeedFrom {
+                from: real_archive_path,
+                coreutils_basename: coreutils_basename.to_string(),
+            }),
         },
         output_arg: Some(archive_idx),
         output_path: None,

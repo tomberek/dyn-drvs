@@ -48,6 +48,7 @@ fn read_record(path: &Path) -> Record {
         srcs: Vec::new(),
         setup_cmd: None,
         chained_from: None,
+        seed_from: None,
     })
 }
 

@@ -46,6 +46,22 @@ pub fn record_to_thunk_expr(record: &crate::record::Record) -> String {
     if let Some(setup) = &record.setup_cmd {
         script.push_str(setup);
     }
+    // See `drv.rs::record_to_derivation`'s identical handling for the
+    // full rationale. `Thunk{Nix}` mode has no cross-thunk `deps` map
+    // (`record_to_thunk_expr` never resolves another thunk's own
+    // identity -- see `thunk_tail.rs::realise_and_promote`'s own doc:
+    // no `import` chaining exists here yet), so `seed.from` is used as
+    // literal text -- correct as long as it's already a real
+    // `/nix/store/...` path, which `ranlib_to_node`'s own caller
+    // (`wrapper::rewrite_argv_element`) guarantees outside a sandbox
+    // (`Thunk` mode's own operating context).
+    if let Some(seed) = &record.seed_from {
+        script.push_str(&format!(
+            "/nix/store/{cu}/bin/cp {} $out && /nix/store/{cu}/bin/chmod u+w $out && ",
+            crate::render::shell_quote(&seed.from),
+            cu = seed.coreutils_basename,
+        ));
+    }
     script.push_str(&record.tool);
     for a in &record.args {
         script.push(' ');

@@ -58,7 +58,7 @@ fn run_drv_format(
     // plain (and, once this `.drv` is realized elsewhere, likely
     // nonexistent) relative-path string.
     let mut deps = std::collections::HashMap::new();
-    for a in &record.args {
+    for a in record.args.iter().chain(record.seed_from.as_ref().map(|s| &s.from)) {
         if a == "$out" || a.starts_with('-') {
             continue;
         }

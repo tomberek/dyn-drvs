@@ -40,6 +40,32 @@ where
         }
         srcs.extend(rec.srcs.iter().cloned());
 
+        // A `seed_from` reference (`ranlib_to_node`'s own "index this
+        // archive in place" need) only applies to a STANDALONE,
+        // non-chained invocation -- i.e. this is the FIRST command in
+        // the chain (`cmd_line` still empty). A CHAINED `ranlib`
+        // following `ar` at the SAME output path needs no seeding at
+        // all: the chain's own preceding member already populated
+        // `own_out_var` moments earlier in THIS combined script, and
+        // (confirmed by direct reproduction) `seed.from` in that exact
+        // case is the stub's OWN self-referential relative-path text
+        // (rewrite_argv_element leaves it untouched, since the archive
+        // is itself still-pending at rewrite time) -- resolving it via
+        // `resolve_ref` would wrongly substitute a per-member output
+        // token (`$<sanitized-name>`) that's never actually set as an
+        // env var for a solo unit's own `$out`.
+        if cmd_line.is_empty() {
+            if let Some(seed) = &rec.seed_from {
+                let source_token = resolve_ref(&seed.from).unwrap_or_else(|| seed.from.clone());
+                setup_cmd.push_str(&format!(
+                    "/nix/store/{cu}/bin/cp {} {out} && /nix/store/{cu}/bin/chmod u+w {out} && ",
+                    shell_quote(&source_token),
+                    cu = seed.coreutils_basename,
+                    out = own_out_var,
+                ));
+            }
+        }
+
         let mut args_line = String::new();
         for a in &rec.args {
             args_line.push(' ');

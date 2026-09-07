@@ -265,20 +265,31 @@ fn stage_tree(paths: &[String]) -> anyhow::Result<PathBuf> {
 /// funnel into this once a `Decision::Defer` is known, so the
 /// per-`DyndrvMode` branching lives in exactly one place.
 ///
-/// `DyndrvMode::Sandbox`'s own branch splits further on `record.key`:
-/// a KEYLESS record (file-granularity, the common default -- see
-/// `mkAcceleratedStdenv.nix`'s own header comment on `granularity`)
-/// registers EAGERLY (task #85) via the SAME `record_to_derivation`/
-/// `add_drv_to_store` path `Rpc` mode already uses -- legal inside a
-/// `builder-rpc-v0` sandbox (`AddToStore*` is allowlisted there, only
-/// `BuildPaths`/realization is restricted, confirmed by `phases/
-/// split.nix`'s own header). A KEYED record (`granularity = "module"`,
-/// where multiple compiles must accumulate into ONE combined derivation
-/// before any of them can finalize) stays on the OLD deferred-JSON-
-/// record path (`finalize_defer`) unchanged -- eager registration has
-/// no way to know "this compile is done accumulating its own batch
-/// group" at the moment any SINGLE compile runs, so that case still
-/// needs `dyndrv-collect`'s own end-of-build merge pass.
+/// `DyndrvMode::Sandbox`'s own branch splits further: a record that's
+/// both KEYLESS (file-granularity, the common default -- see
+/// `mkAcceleratedStdenv.nix`'s own header comment on `granularity`) AND
+/// has no dependency on an still-pending TEXT stub registers EAGERLY
+/// (task #85) via the SAME `record_to_derivation`/`add_drv_to_store`
+/// path `Rpc` mode already uses -- legal inside a `builder-rpc-v0`
+/// sandbox (`AddToStore*` is allowlisted there, only `BuildPaths`/
+/// realization is restricted, confirmed by `phases/split.nix`'s own
+/// header). Everything else stays on the OLD deferred-JSON-record path
+/// (`finalize_defer`).
+///
+/// The dependency check matters because `ar`/`ranlib` are ALWAYS
+/// keyless themselves (`tonode.rs`'s own decision logic never assigns
+/// either a `key`), regardless of `granularity` -- checking `record.key`
+/// ALONE would wrongly route a `granularity = "module"` build's own
+/// `ar` step onto the eager path even when its `.o` inputs are still
+/// KEYED, text-stub-based batched compiles (module-granularity always
+/// stays on the OLD deferred-JSON collector, task #86's own remaining
+/// scope) -- confirmed by direct reproduction against example 06's
+/// compiled variant: `stub::read_pending_symlink` (eager mode's own
+/// dependency-detection primitive) never matches a TEXT stub, so eager
+/// registration would have silently rendered each `.o` arg as a bogus
+/// LITERAL relative-path string instead of either a real cross-drv edge
+/// or a fallback to the OLD collector. `record_has_pending_text_stub_
+/// dep` below detects this and forces the fallback.
 fn dispatch_defer(
     client: &BuilderRpcClient,
     mode: DyndrvMode,
@@ -286,7 +297,9 @@ fn dispatch_defer(
     record: Record,
 ) -> anyhow::Result<()> {
     match mode {
-        DyndrvMode::Sandbox if record.key.is_none() => {
+        DyndrvMode::Sandbox
+            if record.key.is_none() && !record_has_pending_text_stub_dep(&record) =>
+        {
             run_sandbox_eager_tail(client, output_path, record)
         }
         DyndrvMode::Sandbox => finalize_defer(output_path, record),
@@ -301,6 +314,21 @@ fn dispatch_defer(
             run_thunk_tail(client, output_path, record, format, autoforce)
         }
     }
+}
+
+/// True if any of `record`'s own dependency references (`args`,
+/// `seed_from`) is currently a `Sandbox`-mode TEXT stub (`stub::
+/// read_batch_stub`) -- i.e. a dependency that's STILL accumulating in
+/// the OLD deferred-JSON-record collector's own batch group, not yet
+/// resolvable any other way. See `dispatch_defer`'s own doc comment for
+/// why this, not `record.key` alone, decides eager-vs-deferred.
+fn record_has_pending_text_stub_dep(record: &Record) -> bool {
+    let is_text_stub = |a: &str| stub::read_batch_stub(Path::new(a)).is_some();
+    record.args.iter().any(|a| is_text_stub(a))
+        || record
+            .seed_from
+            .as_ref()
+            .is_some_and(|s| is_text_stub(&s.from))
 }
 
 /// `Sandbox` mode's eager, file-granularity tail (task #85): registers
@@ -333,7 +361,7 @@ fn run_sandbox_eager_tail(
     let store_dir = harmonia_store_path::StoreDir::default();
 
     let mut deps = std::collections::HashMap::new();
-    for a in &record.args {
+    for a in record.args.iter().chain(record.seed_from.as_ref().map(|s| &s.from)) {
         if a == "$out" || a.starts_with('-') {
             continue;
         }

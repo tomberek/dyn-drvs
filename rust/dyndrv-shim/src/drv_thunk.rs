@@ -109,6 +109,24 @@ pub fn write_drv_thunk(
     if let Some(setup) = &record.setup_cmd {
         script.push_str(setup);
     }
+    // See `drv.rs::record_to_derivation`'s identical handling for the
+    // full rationale -- `ranlib_to_node`'s own `seed_from` reference
+    // must be copied into `$out` before the tool line runs.
+    if let Some(seed) = &record.seed_from {
+        let source_token = if let Some((dep_drv_path, dep_out_name)) = deps.get(&seed.from) {
+            Placeholder::ca_output(dep_drv_path, dep_out_name)
+                .render()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            seed.from.clone()
+        };
+        script.push_str(&format!(
+            "/nix/store/{cu}/bin/cp {} $out && /nix/store/{cu}/bin/chmod u+w $out && ",
+            crate::render::shell_quote(&source_token),
+            cu = seed.coreutils_basename,
+        ));
+    }
     script.push_str(&record.tool);
     for a in &record.args {
         script.push(' ');
