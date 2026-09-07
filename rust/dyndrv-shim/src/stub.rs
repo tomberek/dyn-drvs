@@ -80,21 +80,28 @@ pub fn read_pending_symlink(
 }
 
 /// True if `path` is ANY pending-dependency representation --
-/// `Sandbox` mode's text stub, `Rpc` mode's real symlink-to-`.drv` (a
-/// STORE path), or `Thunk{Drv}` mode's real symlink-to-`.drv` (a
-/// WORKSPACE-relative `.dyndrv/thunks-drv/` path, not yet in the
-/// store). Callers that only need the boolean fact "is this a
-/// placeholder, not real content" (argv-rewrite guards that would
-/// otherwise wrongly stage placeholder bytes as real file content)
-/// should use this instead of `read_batch_stub(..).is_some()` alone,
-/// now that a pending dependency can be represented three different
-/// ways depending on mode -- confirmed necessary by direct
-/// reproduction: without the `Thunk{Drv}` check, `rewrite_argv_element`
-/// staged a `.drv`-thunk symlink's OWN ATerm bytes as if they were real
-/// object content, corrupting the dependent derivation's `srcs`/script
-/// with a bogus store path instead of a real `inputDrvs` edge.
+/// `Sandbox` mode's text stub, `Rpc`/`Sandbox`-eager mode's real
+/// symlink-to-`.drv` (a STORE path), `Thunk{Drv}` mode's real
+/// symlink-to-`.drv` (a WORKSPACE-relative `.dyndrv/thunks-drv/` path,
+/// not yet in the store), or `Thunk{Nix}` mode's real symlink-to-`.nix`
+/// (a WORKSPACE-relative `.dyndrv/thunks/` path). Callers that only
+/// need the boolean fact "is this a placeholder, not real content"
+/// (argv-rewrite guards that would otherwise wrongly stage placeholder
+/// bytes as real file content) should use this instead of `read_batch_
+/// stub(..).is_some()` alone, now that a pending dependency can be
+/// represented FOUR different ways depending on mode -- confirmed
+/// necessary by direct reproduction (task #78, `Thunk{Drv}` mode):
+/// without that mode's own check, `rewrite_argv_element` staged a
+/// `.drv`-thunk symlink's OWN ATerm bytes as if they were real object
+/// content, corrupting the dependent derivation's `srcs`/script with a
+/// bogus store path instead of a real `inputDrvs` edge. `Thunk{Nix}`
+/// mode's own equivalent gap (this function never recognized a
+/// `.dyndrv/thunks/*.nix` symlink at all, only `Thunk{Drv}`'s
+/// `.dyndrv/thunks-drv/` sibling) was found and fixed the same way
+/// while building task #90's own multi-thunk `import` chaining.
 pub fn is_pending(path: &Path) -> bool {
     read_batch_stub(path).is_some()
         || read_pending_symlink(path).is_some()
         || crate::drv_thunk::resolve_drv_thunk_dependency(path).is_some()
+        || crate::thunk::resolve_nix_thunk_dependency(path).is_some()
 }

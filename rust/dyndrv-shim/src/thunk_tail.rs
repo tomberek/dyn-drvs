@@ -237,7 +237,26 @@ fn run_nix_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow
     let cwd = std::env::current_dir()?;
     let workspace = thunk::resolve_workspace(&cwd);
 
-    let expr = thunk::record_to_thunk_expr(record);
+    // Scan this record's own `args` for positional elements that are
+    // ACTUALLY symlinks into `.dyndrv/thunks/` -- real cross-thunk
+    // dependencies left by an earlier, already-completed shim
+    // invocation in the SAME `Thunk{Nix}` graph (e.g. `ar`'s own `.o`
+    // args, each some earlier `cc` invocation's deferred output). Each
+    // match becomes a real `${import <path>}` interpolation in the
+    // rendered expression (task #90), instead of a plain (and, once
+    // this thunk is realized elsewhere, likely nonexistent) relative-
+    // path string.
+    let mut deps = std::collections::HashMap::new();
+    for a in record.args.iter().chain(record.seed_from.as_ref().map(|s| &s.from)) {
+        if a == "$out" || a.starts_with('-') {
+            continue;
+        }
+        if let Some(dep) = thunk::resolve_nix_thunk_dependency(Path::new(a)) {
+            deps.insert(a.clone(), dep);
+        }
+    }
+
+    let expr = thunk::record_to_thunk_expr(record, &deps);
     let id = thunk::compute_id(&expr);
     let thunk_path = thunk::write_thunk(&workspace, &id, &expr)?;
 
@@ -255,17 +274,18 @@ fn run_nix_format(output_path: &str, record: &Record, autoforce: bool) -> anyhow
     Ok(())
 }
 
-/// Realizes ONE thunk via a plain `nix build --file` and promotes the
-/// result over the caller-visible symlink -- a single-thunk special
-/// case of nixgg's own whole-DAG batching (`realise.Realise`
-/// transitively resolves every `import`-referenced sibling thunk via
-/// ONE combined `nix build` call). Batching across the transitive
-/// thunk graph is follow-on work; this already gives autoforce a real,
-/// working single-step path (`nix build --file` on a thunk that
-/// imports NOTHING beyond already-realized inputs, which covers every
-/// solo `ar`/`ranlib` invocation this binary's own decision logic
-/// produces today -- no cross-thunk `import` chaining exists yet in
-/// `record_to_thunk_expr`).
+/// Realizes the WHOLE transitively-`import`-referenced thunk graph via
+/// ONE `nix build --file` call and promotes the root's own result over
+/// the caller-visible symlink -- mirrors nixgg's own whole-DAG batching
+/// (`realise.Realise`). Verified directly (task #90): `nix build
+/// --file` on a thunk expression that `${import <path>}`s another
+/// thunk transitively builds BOTH derivations in one call, no separate
+/// registration-tree walk needed the way `Thunk{Drv}` mode's own
+/// `register_drv_tree` requires -- a plain Nix expression's `import`
+/// is Nix's own native cross-file reference mechanism, unlike a raw
+/// `.drv` file's `inputDrvs`, which has no such mechanism of its own
+/// and must be registered into the store explicitly before `--realise`
+/// can resolve it.
 fn realise_and_promote(output_abs: &Path, thunk_path: &Path) -> anyhow::Result<()> {
     let out = std::process::Command::new("nix")
         .args([

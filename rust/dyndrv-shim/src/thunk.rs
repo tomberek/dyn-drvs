@@ -28,6 +28,32 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Detects whether `path` is a symlink into `.dyndrv/thunks/` (a
+/// `Thunk{Nix}`-produced dependency, written by an EARLIER, already-
+/// completed shim invocation -- e.g. `ar`'s own `.o` positional args,
+/// each some earlier `cc` invocation's deferred output) and, if so,
+/// returns that target `.nix` file's own absolute path -- for
+/// substituting a real `import <path>` reference into a DEPENDENT
+/// thunk's own expression (task #90's own multi-thunk chaining),
+/// instead of the dependency's literal relative-path TEXT (which,
+/// realized in a completely different working directory, wouldn't
+/// resolve to anything real). Returns `None` for a real file, a
+/// `Thunk{Drv}` thunk symlink (`.dyndrv/thunks-drv/`, a different
+/// directory), or anything else that isn't this specific
+/// representation -- callers fall back to treating the argv element as
+/// plain text in that case. Mirrors `drv_thunk::resolve_drv_thunk_
+/// dependency`'s own identical "check the target's own parent
+/// directory name" convention exactly, since a `.dyndrv/thunks/`
+/// symlink may be absolute OR relative depending on how it was
+/// written.
+pub fn resolve_nix_thunk_dependency(path: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(path).ok()?;
+    if target.parent().and_then(|p| p.file_name()) != Some(std::ffi::OsStr::new("thunks")) {
+        return None;
+    }
+    Some(target)
+}
+
 /// Renders a `Record` as a standalone Nix expression -- a plain
 /// `derivation { ... }` call (no `<nixpkgs>` dependency, matching this
 /// codebase's own established "no IFD needed for the file granularity
@@ -41,37 +67,69 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// nixgg's own `unsafeDiscardStringContext`/`appendContext` workaround,
 /// which exists specifically to dodge the pure-eval restriction this
 /// codebase doesn't need to dodge).
-pub fn record_to_thunk_expr(record: &crate::record::Record) -> String {
-    let mut script = String::new();
+///
+/// `deps`: `{ <record.args element> -> <dependency's own .nix thunk
+/// path> }`, built by the CALLER (`thunk_tail.rs::run_nix_format`'s own
+/// dependency scan, task #90) by detecting which of THIS record's
+/// `args` are symlinks into `.dyndrv/thunks/` -- i.e. real cross-thunk
+/// references, not plain content. For each such element, this function
+/// substitutes a real `import <path>` reference into the SCRIPT's own
+/// reference to that arg (via `${import <path>}`, Nix's own string-
+/// interpolation-of-a-derivation convention -- resolves to the
+/// dependency's OWN realized output path once THIS thunk is built)
+/// instead of the literal relative-path text, which is what makes a
+/// SINGLE `nix build --file` on the root thunk transitively realize the
+/// WHOLE referenced graph on its own -- verified directly: `nix build
+/// --file` on a thunk that `import`s another correctly builds BOTH
+/// derivations in one call, no separate registration-tree walk needed
+/// (unlike `Thunk{Drv}` mode's own `register_drv_tree`, which exists
+/// specifically because a raw `.drv` file has no `import`-equivalent
+/// mechanism of its own).
+pub fn record_to_thunk_expr(
+    record: &crate::record::Record,
+    deps: &std::collections::HashMap<String, PathBuf>,
+) -> String {
+    let mut script = NixStringBuilder::new();
     if let Some(setup) = &record.setup_cmd {
-        script.push_str(setup);
+        script.push_literal(setup);
     }
     // See `drv.rs::record_to_derivation`'s identical handling for the
-    // full rationale. `Thunk{Nix}` mode has no cross-thunk `deps` map
-    // (`record_to_thunk_expr` never resolves another thunk's own
-    // identity -- see `thunk_tail.rs::realise_and_promote`'s own doc:
-    // no `import` chaining exists here yet), so `seed.from` is used as
-    // literal text -- correct as long as it's already a real
-    // `/nix/store/...` path, which `ranlib_to_node`'s own caller
-    // (`wrapper::rewrite_argv_element`) guarantees outside a sandbox
-    // (`Thunk` mode's own operating context).
+    // full rationale. `seed.from` resolves through `deps` the same way
+    // an `args` element does -- see below.
     if let Some(seed) = &record.seed_from {
-        script.push_str(&format!(
-            "/nix/store/{cu}/bin/cp {} $out && /nix/store/{cu}/bin/chmod u+w $out && ",
-            crate::render::shell_quote(&seed.from),
+        script.push_literal(&format!("/nix/store/{cu}/bin/cp ", cu = seed.coreutils_basename));
+        if let Some(dep_path) = deps.get(&seed.from) {
+            script.push_interp(&format!("import {}", nix_path_literal(dep_path)));
+        } else {
+            script.push_literal(&crate::render::shell_quote(&seed.from));
+        }
+        script.push_literal(&format!(
+            " $out && /nix/store/{cu}/bin/chmod u+w $out && ",
             cu = seed.coreutils_basename,
         ));
     }
-    script.push_str(&record.tool);
+    script.push_literal(&record.tool);
     for a in &record.args {
-        script.push(' ');
+        script.push_literal(" ");
         if a == "$out" {
-            script.push_str(a);
+            // The literal sentinel "$out" must stay UNESCAPED as raw
+            // Nix-string text (`$out`, not `\$out`) so the builder's own
+            // shell expands it -- confirmed by direct reproduction:
+            // escaping it makes `/bin/sh -c` see the literal three
+            // characters `$out` unexpanded. `push_literal`'s own
+            // escaping only touches `"`/`\`/`\n`/a BARE interpolation-
+            // introducing `$` (i.e. `${`) -- a lone `$` followed by
+            // anything else (like `out`) is untouched by Nix's own
+            // string-escaping rules, so this is already safe to push as
+            // a plain literal rather than needing special-casing here.
+            script.push_literal(a);
+        } else if let Some(dep_path) = deps.get(a) {
+            script.push_interp(&format!("import {}", nix_path_literal(dep_path)));
         } else {
-            script.push_str(&crate::render::shell_quote(a));
+            script.push_literal(&crate::render::shell_quote(a));
         }
     }
-    script.push_str("; ");
+    script.push_literal("; ");
 
     let srcs_list = record
         .srcs
@@ -82,23 +140,79 @@ pub fn record_to_thunk_expr(record: &crate::record::Record) -> String {
 
     format!(
         "let srcs = [ {srcs_list} ]; in\nderivation {{\n  name = \"dyndrv-thunk\";\n  system = builtins.currentSystem;\n  builder = \"/bin/sh\";\n  args = [ \"-c\" {} ];\n  __contentAddressed = true;\n  outputHashMode = \"nar\";\n  outputHashAlgo = \"sha256\";\n  # Referencing `srcs` here (even though the script never reads this\n  # attribute directly -- every path is already inlined as an absolute\n  # string above) is what actually registers each store path as a real\n  # input dependency; a plain string interpolated into `args` alone\n  # carries no context of its own.\n  inherit srcs;\n}}\n",
-        nix_string_escape(&script),
+        script.finish(),
     )
 }
 
-fn nix_string_escape(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '$' => out.push_str("\\$"),
-            '\n' => out.push_str("\\n"),
-            _ => out.push(c),
+/// Renders an absolute filesystem path as a literal Nix PATH
+/// expression (`/abs/path`, unquoted -- Nix's own path-literal syntax,
+/// distinct from a string) -- what `import` expects as its argument.
+/// `thunk_path`s are always absolute already (`resolve_nix_thunk_
+/// dependency`'s own `read_link` result, or `write_thunk`'s own
+/// `workspace.join(...)` construction), so no relative-path handling
+/// is needed here.
+fn nix_path_literal(path: &Path) -> String {
+    path.display().to_string()
+}
+
+/// Builds a Nix double-quoted string literal from a mix of LITERAL
+/// text (escaped normally) and raw INTERPOLATION expressions (`${...}`,
+/// emitted verbatim, never escaped) -- needed because `record_to_thunk_
+/// expr`'s own dependency substitution must emit a REAL Nix
+/// interpolation (`${import <path>}`) that the Nix evaluator itself
+/// expands, not literal text. Confirmed necessary by direct
+/// reproduction: an earlier version of this function ran the WHOLE
+/// script string (interpolation syntax included) through a single
+/// blanket escape pass at the end, which escaped the interpolation's
+/// own `$` into `\$` -- Nix never expands an escaped `\${...}`, so the
+/// resulting derivation's builder script contained the LITERAL text
+/// `${import ./dep.nix}` instead of the dependency's real realized
+/// path, and the builder's own `/bin/sh` failed with "bad
+/// substitution" trying to interpret that text as a SHELL variable
+/// expansion instead.
+struct NixStringBuilder {
+    out: String,
+}
+
+impl NixStringBuilder {
+    fn new() -> Self {
+        Self {
+            out: String::from("\""),
         }
     }
-    out.push('"');
-    out
+
+    fn push_literal(&mut self, s: &str) {
+        for c in s.chars() {
+            match c {
+                '"' => self.out.push_str("\\\""),
+                '\\' => self.out.push_str("\\\\"),
+                '\n' => self.out.push_str("\\n"),
+                // A bare `$` followed by `{` starts a Nix interpolation
+                // even inside a literal push (e.g. a `setup_cmd` string
+                // that happens to contain literal `${` text, which
+                // none of this codebase's own producers generate today,
+                // but escaping it defensively costs nothing and avoids
+                // a latent injection surface if one ever does).
+                '$' => self.out.push_str("\\$"),
+                _ => self.out.push(c),
+            }
+        }
+    }
+
+    /// Emits `${<expr>}` verbatim -- `expr` is trusted Nix source text
+    /// (a resolved dependency's own absolute path, never user-
+    /// controlled argv content), matching `nix_path_literal`'s own
+    /// "always absolute, never needs escaping" guarantee.
+    fn push_interp(&mut self, expr: &str) {
+        self.out.push_str("${");
+        self.out.push_str(expr);
+        self.out.push('}');
+    }
+
+    fn finish(mut self) -> String {
+        self.out.push('"');
+        self.out
+    }
 }
 
 /// Writes a thunk file at `.dyndrv/thunks/<id>.nix` under `workspace`,
