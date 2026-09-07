@@ -431,6 +431,73 @@ read_pending_symlink`), instead of a JSON-record text stub.
   (correctly still falls back to the old collector, correct program
   output), and the `Thunk{Drv}` multi-node fixture.
 
+## Symlink-IR redesign: `Sandbox` mode's module-granularity path (task #86)
+
+`Sandbox` mode's module-granularity path (`granularity = "module"`) is
+also redesigned per the plan's own proposed "group-state" mechanism,
+rather than staying on the old deferred-JSON collector: each batch
+group (`record.key`) accumulates its members into ONE growing,
+multi-output derivation, registered incrementally after EVERY member
+compile.
+
+- **New `group.rs` module**: `accumulate_and_register` reads a LOCAL
+  copy of the group's current head derivation's own ATerm bytes
+  (`.dyndrv/groups/<key>/head.drv`), re-parses it, appends the new
+  member's own script line + named output, and re-registers the whole
+  thing via `add_drv_to_store`. Each member's own caller-visible output
+  is symlinked at the group's current head with a `#<output-name>`
+  suffix — `stub::read_pending_symlink` now returns `(StorePath,
+  OutputName)` instead of just `StorePath` to carry this.
+- **Confirmed the SAME sandbox-visibility gap task #83's spike found
+  applies here too**: a store path registered moments earlier by an
+  EARLIER member's own invocation is NOT locally readable from inside
+  the same sandbox — confirmed by direct reproduction (a real `cp:
+  cannot stat`-equivalent failure the first time this was tried against
+  the store path directly). Fixed the same way `Thunk{Drv}` mode's
+  `write_drv_thunk` does: a LOCAL file this process itself controls,
+  never a read-back through `/nix/store/<head>`.
+- **Real bug found and fixed during verification**: `reparse_head`
+  initially passed a hardcoded placeholder name to `parse_derivation_
+  aterm` instead of the group's own deterministic name — since a
+  parsed `Derivation`'s own `name` field is taken directly from that
+  argument (not read back from the ATerm bytes), this silently
+  RENAMED the group's derivation on every subsequent member. Confirmed
+  via `nix derivation show`: a two-member group registered TWO
+  differently-named derivations instead of accumulating onto one.
+  Fixed by computing the group's name once from `key` and reusing it
+  for both the fresh-group and reparse code paths.
+- **`dyndrv-collect.rs`'s own Phase 7/8 needed fixing too**: every
+  "solo unit → output `\"out\"`" shortcut assumed a solo eager unit's
+  real output was always `"out"` — true for task #85's file-
+  granularity case, false for a group member (always its own solo unit
+  per `assign_units`' merge rule, but carrying a real NAMED output
+  within its group's shared multi-output derivation). Added a
+  `solo_output_name` map threaded through the per-unit render,
+  cross-unit reference resolution, and final-tree placeholder
+  substitution.
+- **`wrapper.rs::dispatch_defer`'s `Sandbox` branch now splits three
+  ways**: keyless + no pending-text-stub dependency → file-granularity
+  eager (task #85, unchanged); keyed + no pending-text-stub dependency
+  → group accumulation (task #86, new); anything else (a dependency
+  still a pending text stub, meaning the group hasn't finished
+  transitioning yet) → the old deferred-JSON collector, unchanged.
+- **Verified end-to-end**: example 06's compiled module-granularity
+  variant now registers ONE combined multi-output `dyndrv-batch-
+  vendor.drv` for both `vendor/*.o` compiles (confirmed via `nix
+  derivation show`: one name, two named outputs, both script lines
+  present, in order) and the built `prog` produces the correct output.
+  The "byte-identical to today's collector" claim the plan flagged as
+  an open risk was NOT separately verified byte-for-byte (the group
+  derivation's own script/env shape is structurally equivalent by
+  construction — same per-member render logic reused from `group::
+  append_member`, mirroring `render.rs::render_unit`'s own per-member
+  loop — but no `cross_mode_check.rs`-style byte-diff was run against
+  this specific case). Existing fixtures re-verified unchanged: example
+  05 (byte-identical output path), `ar-integration-test`, `collect-
+  integration-test`, the `Thunk{Drv}` multi-node fixture, and a real
+  `nix develop`-driven `Rpc`-mode devShell session (`cc`+`ar`+`ranlib`+
+  link, autoforce).
+
 ## What's still follow-on work
 
 - Batching across the transitive thunk graph for `Thunk { format: Nix
@@ -444,9 +511,14 @@ read_pending_symlink`), instead of a JSON-record text stub.
   `/nonexistent`-unwritable-in-a-real-sandbox bug this attempt found and
   fixed along the way, switching the placeholder to `/build/dyndrv-
   placeholder-out`).
-- The symlink-based intermediate-representation redesign for `Sandbox`
-  mode's MODULE-granularity path (`granularity = "module"`) is still
-  open (task #86) — today it stays entirely on the old deferred-JSON
-  collector; the plan's own proposed "group-state file" incremental-
-  accumulation mechanism is unimplemented, and its core "byte-identical
-  to today's collector" claim is unverified.
+- The symlink-IR redesign's own "byte-identical to today's collector"
+  claim for module-granularity (flagged above) hasn't been verified via
+  a direct byte-diff the way `cross_mode_check.rs` verifies solo-record
+  cross-mode agreement — worth doing if module-granularity's own
+  real-world adoption grows past the current toy fixture.
+- No new eager-mode-specific Nix-level regression fixture exists yet
+  for `granularity = "module"` (example 06's compiled variant is the
+  only current coverage) — a dedicated `dyndrv-shim`-crate-level
+  integration test (mirroring `ar-integration-test.nix`'s own pattern)
+  would give tighter, faster-to-run coverage than a full example build.
+
