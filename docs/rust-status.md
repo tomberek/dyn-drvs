@@ -486,17 +486,25 @@ compile.
   vendor.drv` for both `vendor/*.o` compiles (confirmed via `nix
   derivation show`: one name, two named outputs, both script lines
   present, in order) and the built `prog` produces the correct output.
-  The "byte-identical to today's collector" claim the plan flagged as
-  an open risk was NOT separately verified byte-for-byte (the group
-  derivation's own script/env shape is structurally equivalent by
-  construction — same per-member render logic reused from `group::
-  append_member`, mirroring `render.rs::render_unit`'s own per-member
-  loop — but no `cross_mode_check.rs`-style byte-diff was run against
-  this specific case). Existing fixtures re-verified unchanged: example
-  05 (byte-identical output path), `ar-integration-test`, `collect-
-  integration-test`, the `Thunk{Drv}` multi-node fixture, and a real
-  `nix develop`-driven `Rpc`-mode devShell session (`cc`+`ar`+`ranlib`+
-  link, autoforce).
+  Existing fixtures re-verified unchanged: example 05 (byte-identical
+  output path), `ar-integration-test`, `collect-integration-test`, the
+  `Thunk{Drv}` multi-node fixture, and a real `nix develop`-driven
+  `Rpc`-mode devShell session (`cc`+`ar`+`ranlib`+link, autoforce).
+- **Byte-diff verified (task #88)**: the plan's own "byte-identical to
+  today's collector" claim, flagged as an open risk, is CONFIRMED —
+  a throwaway check binary (`group-render-check.rs`, built, run,
+  deleted, mirroring this session's own `compute-drv-check.rs`/
+  `cross_mode_check.rs` discipline) built the identical two-member
+  `vendor/lib_a.o`+`vendor/lib_b.o` batch group both ways: once through
+  the OLD collector's own `render.rs::render_unit` (the SAME code path
+  `dyndrv-collect.rs`'s Phase 7 uses for a real, still-deferred batch),
+  once through the NEW eager path's `group::append_member`, called
+  twice in sequence exactly as `accumulate_and_register` would. The two
+  resulting `Derivation`s' printed ATerm bytes were byte-for-byte
+  IDENTICAL (670 bytes, exact match) — confirming the incremental,
+  per-invocation accumulation produces the SAME content-addressed
+  result as the old collector's single end-of-build merge, for this
+  representative case.
 
 ## What's still follow-on work
 
@@ -511,11 +519,6 @@ compile.
   `/nonexistent`-unwritable-in-a-real-sandbox bug this attempt found and
   fixed along the way, switching the placeholder to `/build/dyndrv-
   placeholder-out`).
-- The symlink-IR redesign's own "byte-identical to today's collector"
-  claim for module-granularity (flagged above) hasn't been verified via
-  a direct byte-diff the way `cross_mode_check.rs` verifies solo-record
-  cross-mode agreement — worth doing if module-granularity's own
-  real-world adoption grows past the current toy fixture.
 - No new eager-mode-specific Nix-level regression fixture exists yet
   for `granularity = "module"` (example 06's compiled variant is the
   only current coverage) — a dedicated `dyndrv-shim`-crate-level
