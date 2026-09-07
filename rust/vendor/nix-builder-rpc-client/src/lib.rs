@@ -320,6 +320,25 @@ impl BuilderRpcClient {
         })?;
         Ok(())
     }
+
+    /// Checks whether `path` is already a valid, registered store path --
+    /// a real daemon RPC call (`Operation::IsValidPath`, already present
+    /// on the lower-level `harmonia_store_remote::DaemonStore` trait this
+    /// crate wraps, just not previously exposed here). Added locally for
+    /// dyndrv's own symlink-based intermediate-representation work: a
+    /// store path registered via `add_drv_to_store` mid-build inside a
+    /// `builder-rpc-v0` sandbox is NOT locally `stat`-able from within
+    /// that same sandbox (confirmed by direct reproduction, see dyndrv's
+    /// own `docs/rust-status.md`), so detecting "is this dependency
+    /// already resolved" there needs this daemon round-trip instead of a
+    /// plain filesystem check.
+    pub fn is_valid_path(&self, path: &StorePath) -> Result<bool> {
+        let valid = self.runtime.block_on(async {
+            let mut guard = self.pool.acquire().await?;
+            guard.execute(|client| client.is_valid_path(path)).await
+        })?;
+        Ok(valid)
+    }
 }
 
 /// `$NIX_REMOTE` is typically `unix:///abs/path/to/socket` or the legacy
