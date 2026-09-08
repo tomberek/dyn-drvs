@@ -52,32 +52,12 @@ if [[ -z "${KEEP:-}" ]]; then
   trap 'chmod -R u+w "$WORKDIR" 2>/dev/null; rm -rf "$WORKDIR" || true' EXIT
 fi
 
-EXTRA_FEATURES="nix-command ca-derivations dynamic-derivations recursive-nix"
-SYSTEM_FEATURES="builder-rpc-v0"
-
-# Same version-matching requirement `small-lib-patch-rebuild.sh`/
-# `real-package-patch-rebuild.sh` already document.
-DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths \
-  -f "$DYNDRV_ROOT/patched-nix.nix" '^out')
-NIX_BIN="$DYNDRV_NIX/bin/nix"
-
-# `USE_COMPILED_SHIM=1` re-measures against the compiled `rust/
-# dyndrv-shim` path -- see `real-package-patch-rebuild.sh`'s own
-# identical wiring for the full rationale.
-DYNDRV_SHIM_ARGS=()
-if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-  DYNDRV_SHIM=$(nix build --impure --no-link --print-out-paths \
-    -f "$DYNDRV_ROOT/../rust/dyndrv-shim.nix" '^out')
-  DYNDRV_SHIM_ARGS=(--argstr dyndrvShimPath "$DYNDRV_SHIM")
-fi
+# shellcheck source=./real-package-bench-lib.sh
+source "$SCRIPT_DIR/real-package-bench-lib.sh"
 
 echo "dyndrv real-package-version-bump benchmark (nixpkgs freetype, multi-file patch)"
 echo "workdir=$WORKDIR"
-if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-  echo "shim=compiled ($DYNDRV_SHIM)"
-else
-  echo "shim=bash (toNodeBash/collectStubs)"
-fi
+print_shim_banner
 echo ""
 
 cat > "$WORKDIR/version-bump.diff" <<'PATCH_EOF'
@@ -110,72 +90,27 @@ cat > "$WORKDIR/version-bump.diff" <<'PATCH_EOF'
   *   FreeType initialization layer (body).
 PATCH_EOF
 
-nix_build() {
-  local store="$1" variant="$2" withPatch="$3"
-  local patchArgs=()
-  if [[ "$withPatch" = "1" ]]; then
-    patchArgs=(--arg patch "$WORKDIR/version-bump.diff")
-  fi
-  "$NIX_BIN" build \
-    --extra-experimental-features "$EXTRA_FEATURES" \
-    --extra-system-features "$SYSTEM_FEATURES" \
-    --store "local?root=$store" \
-    --no-link --print-out-paths \
-    --impure --argstr variant "$variant" \
-    --argstr nixPackagePath "$DYNDRV_NIX" \
-    "${DYNDRV_SHIM_ARGS[@]}" \
-    "${patchArgs[@]}" \
-    -f "$SCRIPT_DIR/real-package-lib.nix"
-}
-
-time_build() {
-  local store="$1" variant="$2" withPatch="$3"
-  local start end
-  start=$(date +%s.%N)
-  nix_build "$store" "$variant" "$withPatch" >"$WORKDIR/last-build.log" 2>&1
-  end=$(date +%s.%N)
-  awk -v s="$start" -v e="$end" 'BEGIN { printf "%.2f", e - s }' > "$WORKDIR/last-elapsed"
-}
-
-count_dyndrv_builds() {
-  # Same convention `real-package-patch-rebuild.sh`'s own identical
-  # helper uses -- see that script's header comment for the full
-  # rationale on why the compiled path's own naming needs a different
-  # pattern than the bash path's `dyndrv-`-prefixed convention.
-  if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-    grep -cE "building '.*(\.o|\.lo)\.drv'|building '.*dyndrv-batch-.*\.drv'" "$WORKDIR/last-build.log" || true
-  else
-    grep -c "building '.*dyndrv-.*\.drv'" "$WORKDIR/last-build.log" || true
-  fi
-}
-
 echo "=== Plain stdenv.mkDerivation (real nixpkgs freetype) ==="
 echo "-- cold build --"
-time_build "$WORKDIR/store-plain" "plain" 0
+time_build "$WORKDIR/store-plain" "plain" ""
 plain_cold_time=$(cat "$WORKDIR/last-elapsed")
 echo "  ${plain_cold_time}s"
 
 echo "-- version-bump rebuild (3 files changed across 2 subdirectories) --"
-time_build "$WORKDIR/store-plain" "plain" 1
+time_build "$WORKDIR/store-plain" "plain" "$WORKDIR/version-bump.diff"
 plain_patch_time=$(cat "$WORKDIR/last-elapsed")
 echo "  ${plain_patch_time}s (rebuilds the whole derivation)"
 echo ""
 
 echo "=== dyndrv.accelerate.mkAcceleratedStdenv (real nixpkgs freetype) ==="
-if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-  # See `real-package-patch-rebuild.sh`'s own identical step for why
-  # this copy is required -- a fresh alt store has no substituter for
-  # the ambient-store-built, purely-local `DYNDRV_SHIM` closure.
-  mkdir -p "$WORKDIR/store-accelerated"
-  "$NIX_BIN" copy --no-check-sigs --to "local?root=$WORKDIR/store-accelerated" "$DYNDRV_SHIM"
-fi
+copy_compiled_shim_if_needed "$WORKDIR/store-accelerated"
 echo "-- cold build --"
-time_build "$WORKDIR/store-accelerated" "accelerated" 0
+time_build "$WORKDIR/store-accelerated" "accelerated" ""
 acc_cold_time=$(cat "$WORKDIR/last-elapsed")
 echo "  ${acc_cold_time}s"
 
 echo "-- version-bump rebuild (3 files changed across 2 subdirectories) --"
-time_build "$WORKDIR/store-accelerated" "accelerated" 1
+time_build "$WORKDIR/store-accelerated" "accelerated" "$WORKDIR/version-bump.diff"
 acc_patch_time=$(cat "$WORKDIR/last-elapsed")
 acc_patch_rebuilt=$(count_dyndrv_builds)
 echo "  ${acc_patch_time}s"

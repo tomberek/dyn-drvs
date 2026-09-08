@@ -19,16 +19,24 @@
 # Builds a 3-file C program (main.c + vendor/lib_a.c + vendor/lib_b.c)
 # via an ordinary Makefile; the final linked binary runs and produces
 # correct output (5 = lib_a(1) + lib_b(1) = 2 + 3).
+#
+# `dyndrvShim ? null`: pass the compiled `rust/dyndrv-shim` package
+# (`import ../../rust/dyndrv-shim.nix { inherit pkgs; }`) to exercise
+# `granularity = "module"`/`DYNDRV_BATCH_GROUPS` through the compiled
+# `cc` shim instead of the default bash `toNodeBash`/`collectStubs`
+# path -- for direct comparison between the two, not a different example.
 
-let
-  pkgs = import <nixpkgs> { };
-  lib = pkgs.lib;
-  dyndrv = import ../../nix { inherit pkgs lib; };
-
+{
+  pkgs ? import <nixpkgs> { },
+  lib ? pkgs.lib,
+  dyndrv ? import ../../nix { inherit pkgs lib; },
   # See 05-accelerate-stdenv.nix's own comment on this -- must match the
   # Nix `try-it-out/run-nix.sh` uses to drive this build.
-  patchedNix = import ../patched-nix.nix { };
+  nixPackage ? import ../patched-nix.nix { },
+  dyndrvShim ? null,
+}:
 
+let
   src = pkgs.runCommand "accelerate-module-example-src" { } ''
     mkdir -p $out/vendor
     cat > $out/main.c <<'EOF'
@@ -73,9 +81,10 @@ in
 plain.override {
   stdenv = dyndrv.accelerate.mkAcceleratedStdenv {
     inherit (plain) stdenv;
-    nixPackage = patchedNix;
+    inherit nixPackage;
     granularity = "module";
     # Opt-in per path -- here, everything under vendor/ batches.
     shouldBatch = path: lib.hasPrefix "vendor/" path;
+    inherit dyndrvShim;
   };
 }

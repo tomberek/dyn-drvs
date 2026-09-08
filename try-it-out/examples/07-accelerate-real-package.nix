@@ -46,19 +46,29 @@
 #     ./test
 #   '
 # expecting output "FreeType 2.14.3".
+#
+# `dyndrvShim ? null`: pass the compiled `rust/dyndrv-shim` package
+# (`import ../../rust/dyndrv-shim.nix { inherit pkgs; }`) to exercise the
+# compiled `cc` shim's discoverTree-equivalent path (cc.rs's
+# `discover_tree`/`cc_to_node`) against this real package's ~45
+# translation units and real cross-package -I/-L build inputs -- scale
+# and complexity 05/06's toy fixtures don't exercise -- instead of the
+# default bash `toNodeBash`/`collectStubs` path.
 
-let
-  pkgs = import <nixpkgs> { };
-  lib = pkgs.lib;
-  dyndrv = import ../../nix { inherit pkgs lib; };
-
+{
+  pkgs ? import <nixpkgs> { },
+  lib ? pkgs.lib,
+  dyndrv ? import ../../nix { inherit pkgs lib; },
   # See 05-accelerate-stdenv.nix's own comment on this -- must match the
   # Nix `try-it-out/run-nix.sh` uses to drive this build.
-  patchedNix = import ../patched-nix.nix { };
+  nixPackage ? import ../patched-nix.nix { },
+  dyndrvShim ? null,
+}:
 
+let
   acceleratedStdenv = dyndrv.accelerate.mkAcceleratedStdenv {
     stdenv = pkgs.stdenv;
-    nixPackage = patchedNix;
+    inherit nixPackage dyndrvShim;
   };
 
   # The one-line change: override the stdenv a REAL, unmodified nixpkgs

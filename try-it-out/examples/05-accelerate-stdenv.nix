@@ -22,12 +22,18 @@
 #
 # Run with:
 #   try-it-out/run-nix.sh build --impure --no-link -f try-it-out/examples/05-accelerate-stdenv.nix
+#
+# `dyndrvShim ? null`: pass the compiled `rust/dyndrv-shim` package
+# (`import ../../rust/dyndrv-shim.nix { inherit pkgs; }`) to exercise the
+# compiled `dyndrv-shim`/`dyndrv-collect` path instead of the default
+# bash `toNodeBash`/`collectStubs` path -- both produce byte-identical
+# behavior; this is here for direct comparison between the two, not a
+# different example.
 
-let
-  pkgs = import <nixpkgs> { };
-  lib = pkgs.lib;
-  dyndrv = import ../../nix { inherit pkgs lib; };
-
+{
+  pkgs ? import <nixpkgs> { },
+  lib ? pkgs.lib,
+  dyndrv ? import ../../nix { inherit pkgs lib; },
   # `mkAcceleratedStdenv`'s own `nixPackage` version-matching requirement
   # (see that file's header): must be the SAME fetched Nix
   # `try-it-out/run-nix.sh` uses to drive this build, not the ambient
@@ -35,8 +41,11 @@ let
   # `pkgs.nix` here fails with "Operation 19 not allowed inside
   # derivation" (`SetOptions`, rejected by the newer daemon's stricter
   # `builder-rpc-v0` connection allowlist).
-  patchedNix = import ../patched-nix.nix { };
+  nixPackage ? import ../patched-nix.nix { },
+  dyndrvShim ? null,
+}:
 
+let
   src = pkgs.runCommand "accelerate-example-src" { } ''
     mkdir -p $out
     cat > $out/main.c <<'EOF'
@@ -88,5 +97,8 @@ in
 # mechanics, and every real package (`pkgs.foo`, via `callPackage`)
 # already has it.
 plain.override {
-  stdenv = dyndrv.accelerate.mkAcceleratedStdenv { inherit (plain) stdenv; nixPackage = patchedNix; };
+  stdenv = dyndrv.accelerate.mkAcceleratedStdenv {
+    inherit (plain) stdenv;
+    inherit nixPackage dyndrvShim;
+  };
 }

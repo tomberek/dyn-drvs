@@ -58,38 +58,12 @@ if [[ -z "${KEEP:-}" ]]; then
   trap 'chmod -R u+w "$WORKDIR" 2>/dev/null; rm -rf "$WORKDIR" || true' EXIT
 fi
 
-EXTRA_FEATURES="nix-command ca-derivations dynamic-derivations recursive-nix"
-SYSTEM_FEATURES="builder-rpc-v0"
-
-# Same version-matching requirement `small-lib-patch-rebuild.sh` already
-# documents: the Nix driving this build and the `nixPackage` passed
-# internally to `builder-rpc-v0` registration calls must be the SAME
-# fetched build. Resolved once here, exactly the way
-# `try-it-out/run-nix.sh`/`small-lib-patch-rebuild.sh` already do.
-DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths \
-  -f "$DYNDRV_ROOT/patched-nix.nix" '^out')
-NIX_BIN="$DYNDRV_NIX/bin/nix"
-
-# `USE_COMPILED_SHIM=1` re-measures against the compiled `rust/
-# dyndrv-shim` path (dyndrvShim param) instead of the bash `toNodeBash`/
-# `collectStubs` path -- mirrors examples 05/06/07's own `-compiled.nix`
-# variants. Resolved once here, same store both variants build against
-# (the compiled shim itself is an ordinary derivation, not gated on
-# `builder-rpc-v0`).
-DYNDRV_SHIM_ARGS=()
-if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-  DYNDRV_SHIM=$(nix build --impure --no-link --print-out-paths \
-    -f "$DYNDRV_ROOT/../rust/dyndrv-shim.nix" '^out')
-  DYNDRV_SHIM_ARGS=(--argstr dyndrvShimPath "$DYNDRV_SHIM")
-fi
+# shellcheck source=./real-package-bench-lib.sh
+source "$SCRIPT_DIR/real-package-bench-lib.sh"
 
 echo "dyndrv real-package-patch-rebuild benchmark (nixpkgs freetype)"
 echo "workdir=$WORKDIR"
-if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-  echo "shim=compiled ($DYNDRV_SHIM)"
-else
-  echo "shim=bash (toNodeBash/collectStubs)"
-fi
+print_shim_banner
 echo ""
 
 cat > "$WORKDIR/patch.diff" <<'PATCH_EOF'
@@ -104,87 +78,27 @@ cat > "$WORKDIR/patch.diff" <<'PATCH_EOF'
   *   FreeType convenience functions to handle glyphs (body).
 PATCH_EOF
 
-nix_build() {
-  local store="$1" variant="$2" withPatch="$3"
-  local patchArgs=()
-  if [[ "$withPatch" = "1" ]]; then
-    patchArgs=(--arg patch "$WORKDIR/patch.diff")
-  fi
-  "$NIX_BIN" build \
-    --extra-experimental-features "$EXTRA_FEATURES" \
-    --extra-system-features "$SYSTEM_FEATURES" \
-    --store "local?root=$store" \
-    --no-link --print-out-paths \
-    --impure --argstr variant "$variant" \
-    --argstr nixPackagePath "$DYNDRV_NIX" \
-    "${DYNDRV_SHIM_ARGS[@]}" \
-    "${patchArgs[@]}" \
-    -f "$SCRIPT_DIR/real-package-lib.nix"
-}
-
-time_build() {
-  local store="$1" variant="$2" withPatch="$3"
-  local start end
-  start=$(date +%s.%N)
-  nix_build "$store" "$variant" "$withPatch" >"$WORKDIR/last-build.log" 2>&1
-  end=$(date +%s.%N)
-  awk -v s="$start" -v e="$end" 'BEGIN { printf "%.2f", e - s }' > "$WORKDIR/last-elapsed"
-}
-
-count_dyndrv_builds() {
-  # Counts distinct per-unit builder invocations the ACTIVE shim path
-  # registers. The bash `toNodeBash`/`collectStubs` path names a solo
-  # unit `dyndrv-<flattened-relative-path>` (e.g. `dyndrv-objs_ftglyph_o`
-  # for `objs/ftglyph.o`) and a merged batch unit `dyndrv-batch-<key>` --
-  # both start with `dyndrv-` (confirmed against a real freetype build
-  # log directly, matching `small-lib-patch-rebuild.sh`'s own identical
-  # pattern). The COMPILED path (task #85/#86's eager register+symlink
-  # redesign) names each derivation after the OUTPUT'S OWN basename
-  # instead (`wrapper.rs::run_sandbox_eager_tail`'s own `drv_name`,
-  # e.g. `ftglyph.o`) or `dyndrv-batch-<key>` for a module-granularity
-  # group (`group.rs`'s own naming, unchanged from the bash path's own
-  # convention there) -- so under the compiled path, count `.o.drv`/
-  # `.lo.drv` builds (real per-TU compile outputs) plus `dyndrv-batch-`
-  # builds, instead of requiring the `dyndrv-` prefix unconditionally.
-  if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-    grep -cE "building '.*(\.o|\.lo)\.drv'|building '.*dyndrv-batch-.*\.drv'" "$WORKDIR/last-build.log" || true
-  else
-    grep -c "building '.*dyndrv-.*\.drv'" "$WORKDIR/last-build.log" || true
-  fi
-}
-
 echo "=== Plain stdenv.mkDerivation (real nixpkgs freetype) ==="
 echo "-- cold build --"
-time_build "$WORKDIR/store-plain" "plain" 0
+time_build "$WORKDIR/store-plain" "plain" ""
 plain_cold_time=$(cat "$WORKDIR/last-elapsed")
 echo "  ${plain_cold_time}s"
 
 echo "-- patched rebuild (one real source file changed) --"
-time_build "$WORKDIR/store-plain" "plain" 1
+time_build "$WORKDIR/store-plain" "plain" "$WORKDIR/patch.diff"
 plain_patch_time=$(cat "$WORKDIR/last-elapsed")
 echo "  ${plain_patch_time}s (rebuilds the whole derivation)"
 echo ""
 
 echo "=== dyndrv.accelerate.mkAcceleratedStdenv (real nixpkgs freetype) ==="
-if [[ "${USE_COMPILED_SHIM:-0}" = "1" ]]; then
-  # `store-accelerated` is a FRESH alt store -- it has no substituter
-  # for the ambient-store-built `DYNDRV_SHIM` path, so a build against
-  # it fails outright ("is required, but there is no substituter that
-  # can build it") unless that closure is copied in explicitly first.
-  # `nixPackagePath`'s own identical `patched-nix.nix` path never hits
-  # this because it's a real, cache-substitutable Nix build; the
-  # compiled shim is a small, purely local derivation with no cache
-  # entry anywhere. Confirmed necessary by direct reproduction.
-  mkdir -p "$WORKDIR/store-accelerated"
-  "$NIX_BIN" copy --no-check-sigs --to "local?root=$WORKDIR/store-accelerated" "$DYNDRV_SHIM"
-fi
+copy_compiled_shim_if_needed "$WORKDIR/store-accelerated"
 echo "-- cold build --"
-time_build "$WORKDIR/store-accelerated" "accelerated" 0
+time_build "$WORKDIR/store-accelerated" "accelerated" ""
 acc_cold_time=$(cat "$WORKDIR/last-elapsed")
 echo "  ${acc_cold_time}s"
 
 echo "-- patched rebuild (one real source file changed) --"
-time_build "$WORKDIR/store-accelerated" "accelerated" 1
+time_build "$WORKDIR/store-accelerated" "accelerated" "$WORKDIR/patch.diff"
 acc_patch_time=$(cat "$WORKDIR/last-elapsed")
 acc_patch_rebuilt=$(count_dyndrv_builds)
 echo "  ${acc_patch_time}s"
