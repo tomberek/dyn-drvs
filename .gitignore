@@ -1,0 +1,6 @@
+# `Thunk` mode's own on-disk representation (`.dyndrv/thunks/`,
+# `.dyndrv/thunks-drv/`, `.dyndrv/groups/`) -- a workspace-relative
+# scratch directory created by running the compiled shim locally (e.g.
+# via `nix develop`'s own devShell, or any of the rust/dyndrv-shim/
+# *-test.sh fixtures), never meant to be committed.
+/.dyndrv/
