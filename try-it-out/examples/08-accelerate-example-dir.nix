@@ -10,39 +10,22 @@
 # `docs/rust-status.md`'s "Cross-mode substitution" section already
 # confirmed synthetically (`cross_mode_check.rs`).
 #
-# `builder-rpc-v0`-only (phase 1's own requirement) -- the ambient
-# system Nix daemon doesn't support it, so this needs a driving Nix
-# build recent enough to have it, plus an isolated alt store (neither of
-# which the ambient daemon provides) -- exactly what `try-it-out/
-# run-nix.sh` sets up. Standalone:
+# `builder-rpc-v0`-only (phase 1's own requirement) -- run via
+# `try-it-out/run-nix.sh`, same as examples 01/03/05/06/07:
 #
 #   try-it-out/run-nix.sh build --impure --no-link --print-out-paths -f try-it-out/examples/08-accelerate-example-dir.nix
 #
-# Also reachable as `packages.<system>.example` (`flake.nix`), which
-# passes `dyndrv`/`dyndrvShim` in directly instead of re-importing
-# them -- still needs the SAME `run-nix.sh`-equivalent driving-Nix/alt-
-# store wrapper to actually build, since `flake.nix`'s own `nix` input
-# is just a version-matched `nixPackage` source, not a way around the
-# ambient daemon's own missing `builder-rpc-v0` support:
-#
-#   try-it-out/run-nix.sh build --impure --no-link --print-out-paths .#example
-
-{
-  pkgs ? import <nixpkgs> { },
-  lib ? pkgs.lib,
-  dyndrv ? import ../../nix { inherit pkgs lib; },
-  # Must match the OUTER Nix actually driving this build (see
-  # `patched-nix.nix`'s own header comment for the version-matching
-  # requirement) -- a real derivation reference, since this file is
-  # always called from ordinary Nix code (`try-it-out/run-nix.sh` via
-  # `-f`, or `flake.nix`'s own `packages.<system>.example`), never
-  # across a bash-string process boundary the way `real-package-lib.
-  # nix`'s own `nixPackagePath` param exists to support.
-  nixPackage ? import ../patched-nix.nix { },
-  dyndrvShim ? import ../../rust/dyndrv-shim.nix { inherit pkgs; },
-}:
+# Also reachable as the flake output `.#example` (`flake.nix`), same
+# underlying file, still built the same way (`run-nix.sh ... .#example`)
+# -- flakes don't change the `builder-rpc-v0` requirement.
 
 let
+  pkgs = import <nixpkgs> { };
+  lib = pkgs.lib;
+  dyndrv = import ../../nix { inherit pkgs lib; };
+  patchedNix = import ../patched-nix.nix { };
+  dyndrvShim = import ../../rust/dyndrv-shim.nix { inherit pkgs; };
+
   # `../../example`, NOT a `pkgs.runCommand`-synthesized source tree --
   # the one thing this example demonstrates that 01-07 don't: a real,
   # checked-in multi-file project directory works with `mkAccelerated
@@ -65,6 +48,7 @@ in
 plain.override {
   stdenv = dyndrv.accelerate.mkAcceleratedStdenv {
     inherit (plain) stdenv;
-    inherit nixPackage dyndrvShim;
+    nixPackage = patchedNix;
+    inherit dyndrvShim;
   };
 }

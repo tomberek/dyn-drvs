@@ -53,23 +53,12 @@ no separate patched fork or meson build step needed).
 
 ## Status
 
-**v0.1 + v0.2, both implemented and verified end-to-end** against real
-Nix builds (not just designed). See `try-it-out/benchmarks/BASELINE.md`
-and the plan doc referenced in git history for full findings.
-
-- **v0.1**: core primitives (`mkDynamicDerivation`, `mkOutputOf`,
-  `wrapOutputOf`, `capabilities`) and both
-  backends (`builder-rpc-v0` default via `viaDerivationAdd`,
-  `recursive-nix` fallback via `viaNixInstantiate`).
-- **v0.2**: `graph.compile` (whole dependency-graph compilation into one
-  outer submission, `builder-rpc-v0` backend), `shim.wrapCommand`
-  ($PATH-command interception, defer-only, `builder-rpc-v0` backend),
-  `shim.collectStubs` (resolves a whole build tree's deferred stubs into
-  one registered graph, submitting a fully-resolved tree),
-  `phases.split` (the general sandboxed/replay two-derivation primitive),
-  and `accelerate.mkAcceleratedStdenv` (the one-line accelerator built on
-  all of the above — the main adoption lever), plus the
-  `registration-overhead.sh` and `small-lib-patch-rebuild.sh` benchmarks.
+Implemented and verified end-to-end against real Nix builds (not just
+designed): core primitives (`mkDynamicDerivation`, `mkOutputOf`,
+`wrapOutputOf`, `capabilities`, both backends), `graph.compile`,
+`shim.wrapCommand`/`collectStubs`, `phases.split`, and
+`accelerate.mkAcceleratedStdenv` — the main adoption lever, built on all
+of the above. See `try-it-out/benchmarks/BASELINE.md` for the numbers.
 
 ## Layout
 
@@ -107,27 +96,19 @@ myPackage.override {
 Run `try-it-out/examples/05-accelerate-stdenv.nix` for a minimal, runnable
 demo end to end (via `try-it-out/run-nix.sh`, since phase 1 needs
 `builder-rpc-v0`), or `try-it-out/examples/07-accelerate-real-package.nix`
-for the same one-line change applied to real, unmodified nixpkgs
-`freetype` — including a second `patchOutput` attribute in that same file
-showing a one-line source patch (the same idiom as a real version bump)
-correctly triggering just a couple of fresh per-file rebuilds instead of
-recompiling the whole package. See
-`try-it-out/benchmarks/small-lib-patch-rebuild.sh`/
-`real-package-patch-rebuild.sh`/`real-package-version-bump.sh` for the
-accelerator's numbers on synthetic, single-file-real-package, and
-multi-file-real-package (version-bump-shaped) workloads respectively.
+for the same change applied to real, unmodified nixpkgs `freetype`,
+including a one-line source patch showing only the changed files
+rebuild. See `try-it-out/benchmarks/` for the numbers on synthetic and
+real-package workloads.
 
 **Want to build a lang2nix-style tool, or a dependency-graph compiler
-(gradle-drvs'/sandstone's use case)?** The **`builder-rpc-v0` backend is
-the default**. It's on real NixOS/nix `master` (commit `55eea4554`,
-"Implement new builder-rpc-v0 derivation feature") — not in a stable
-release yet, so most installed Nix binaries (Determinate, nixos-unstable's
-pinned Nix, etc.) still don't have it, but `try-it-out/run-nix.sh` fetches
-and builds a working one directly (see `try-it-out/patched-nix.nix`), no
-patched fork or local checkout required. If you'd rather not fetch that,
-`dyndrv.capabilities.withFallback` lets you degrade gracefully — see
-`try-it-out/examples/02-fallback-ifd.nix`, which runs on plain, stock Nix
-with no experimental features at all.
+(gradle-drvs'/sandstone's use case)?** The `builder-rpc-v0` backend is
+the default. It's on real NixOS/nix `master` (commit `55eea4554`) but
+not in a stable release yet — `try-it-out/run-nix.sh` fetches and builds
+a working one directly, no patched fork required. If you'd rather not
+fetch that, `dyndrv.capabilities.withFallback` degrades gracefully to
+IFD — see `try-it-out/examples/02-fallback-ifd.nix`, which runs on
+stock Nix with no experimental features at all.
 
 ```console
 $ ./try-it-out/run-nix.sh build --impure -f try-it-out/examples/01-hello-dynamic-drv.nix
@@ -153,18 +134,18 @@ dyndrv.mkDynamicDerivation {
 
 | Function | What it's for |
 |---|---|
-| `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the whole outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. Leaving `backend` unset now defaults to `"builder-rpc-v0"` directly (a policy choice — not detected, since that's structurally impossible at eval time, see `docs/upstream-tracking.md`) — needs a Nix build recent enough to support it (see `try-it-out/patched-nix.nix`; no patched fork required, on real NixOS/nix `master` since commit `55eea4554`). Pass `backend = "auto"` for the conservative, eval-time-detected choice instead (today: always `"recursive-nix"`), or `backend = "recursive-nix"` to force it directly; check `passthru.backend` to confirm what was actually selected. |
+| `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. `backend` defaults to `"builder-rpc-v0"`; pass `"auto"` for the eval-time-detected choice instead, or `"recursive-nix"` to force it. Check `passthru.backend` to confirm what was selected. |
 | `dyndrv.builders.viaNixInstantiate` / `.viaDerivationAdd` | The two backend-specific ways a single `producer` can construct its inner derivation (`recursive-nix` + `nix-instantiate`, vs. `builder-rpc-v0` + `nix derivation add`/`nix store submit-output`). |
 | `dyndrv.capabilities.detect` / `.withFallback` | Feature detection and a graceful degrade-to-IFD combinator, so adopting `dyndrv` is never an all-or-nothing bet on an experimental Nix feature. |
 | `dyndrv.mkOutputOf` / `dyndrv.wrapOutputOf` | Low-level helpers that paper over `builtins.outputOf`'s two permanent rough edges (string-only argument, `DrvDeep`-context rejection) and turn a raw `outputOf` string into something `nix run`/`nix profile install` can consume. |
 | `dyndrv.placeholder` | Pure-Nix implementation of `DownstreamPlaceholder::unknownCaOutput`, verified byte-for-byte against Nix's own computed placeholder — the exact formula gradle-drvs hand-reimplemented in bash. |
-| `dyndrv.graph.compile` | Compiles a whole dependency graph (many nodes, each possibly depending on other nodes' not-yet-built outputs) into ONE outer submission — `builder-rpc-v0` backend. Optional per-node `group` field merges every node sharing the same `group` string into ONE registered derivation (one `nix derivation add` call, one distinctly-named output per member) instead of one call per node — the one mechanism this library provides for consolidating a fine-grained graph into coarser sub-components; nodes that never set `group` are byte-for-byte unaffected. See `try-it-out/examples/03-graph-with-groups.nix`. |
+| `dyndrv.graph.compile` | Compiles a whole dependency graph (many nodes, each possibly depending on other nodes' not-yet-built outputs) into ONE outer submission — `builder-rpc-v0` backend. Optional per-node `group` field merges nodes sharing a `group` string into one registered derivation. See `try-it-out/examples/03-graph-with-groups.nix`. |
 | `dyndrv.graph.assemble` / `.selectSink` | The two `toOutput` strategies `graph.compile` supports: merge every node's output into one tree, or return one named "sink" node's output directly. |
-| `dyndrv.graph.groupByDirectory` | Canned `group`-assignment helper: given a flat node set and a function extracting each node's own path, sets `group` to that path's directory — sugar over `graph.compile`'s `group` field, not a second grouping mechanism. See `try-it-out/examples/03-graph-groupby-directory.nix`. |
-| `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so every invocation defers -- writes a batch-pending stub instead of running, and returns instantly (there is no live "materialize inline" mode: `builder-rpc-v0` cannot realize a derivation from inside a running script). `builder-rpc-v0` backend. What `accelerate.mkAcceleratedStdenv` is built from. |
-| `dyndrv.shim.collectStubs` | Runs ONCE at the end of a real build (after the build tool has finished against a tree full of deferred stubs): walks the whole tree, reconstructs the full dependency graph from each stub's own record, registers one derivation per unit (auto-merging same-group members, mirroring `graph.compile`'s own topological/placeholder-wiring algorithm ported to bash), and submits a fully-resolved tree. |
-| `dyndrv.phases.split` | The general "sandboxed, then replay" two-derivation primitive (nixgg's own `dynDrvStdenv` phase1/phase2 pattern): phase 1 runs the real build (gated on `builder-rpc-v0`) ending in a `collectStubs` pass; phase 2 is an ORDINARY derivation that runs `installPhase`/`fixupPhase` against phase 1's now-resolved tree, with no special capability needed at all (real multi-output support works here). What `accelerate.mkAcceleratedStdenv` is built on. |
-| `dyndrv.accelerate.mkAcceleratedStdenv` | The lowest-friction entry point in the library: `{ stdenv }: stdenv`, for overriding an existing package's `stdenv` (`myPkg.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }`). Ordinary `cc`/`ar` invocations become independent, per-translation-unit cacheable derivations. `granularity = "file"` (default), `"module"` (opt-in directory-batched compiles via a required `shouldBatch : relativePath -> bool` predicate — see `try-it-out/examples/06-accelerate-stdenv-module.nix`), or `"package"` (no-op escape hatch). `builder-rpc-v0` backend throughout. The returned derivation's own `overrideAttrs` correctly re-runs the WHOLE two-phase build (not just install/fixup) — patches/`configureFlags`/`buildPhase` overrides all take effect, exactly like an ordinary `stdenv.mkDerivation` package. See `try-it-out/examples/07-accelerate-real-package.nix` for this applied to a real, unmodified nixpkgs package. |
+| `dyndrv.graph.groupByDirectory` | Canned `group`-assignment helper: sets each node's `group` to its own path's directory. See `try-it-out/examples/03-graph-groupby-directory.nix`. |
+| `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so every invocation defers — writes a batch-pending stub instead of running, returning instantly (`builder-rpc-v0` cannot realize a derivation from inside a running script). What `accelerate.mkAcceleratedStdenv` is built from. |
+| `dyndrv.shim.collectStubs` | Runs once at the end of a build: walks the tree of deferred stubs, reconstructs the dependency graph, registers one derivation per unit, and submits a fully-resolved tree. |
+| `dyndrv.phases.split` | The "sandboxed, then replay" two-derivation primitive: phase 1 runs the real build (gated on `builder-rpc-v0`) ending in a `collectStubs` pass; phase 2 is an ordinary derivation running `installPhase`/`fixupPhase` against phase 1's resolved tree, with no special capability needed (real multi-output support works here). What `accelerate.mkAcceleratedStdenv` is built on. |
+| `dyndrv.accelerate.mkAcceleratedStdenv` | The lowest-friction entry point: `myPkg.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; }; }`. Ordinary `cc`/`ar` invocations become independent, per-translation-unit cacheable derivations. `granularity`: `"file"` (default), `"module"` (directory-batched compiles via a `shouldBatch` predicate — see example 06), or `"package"` (no-op). `overrideAttrs` correctly re-runs the whole two-phase build, so patches/`configureFlags` overrides work like an ordinary package. See example 07 for a real nixpkgs package. |
 
 ### The producer contract
 
@@ -222,35 +203,21 @@ the tradeoff does *not* favor `dyndrv` too (it's documented, not hidden).
 
 ## Known limitations
 
-- **`accelerate.mkAcceleratedStdenv`'s `granularity = "module"`'s batched
-  member staging has one documented, unguarded gap**: two DIFFERENT
-  batched members staging DIFFERENT content at the SAME relative path
-  silently keep whichever ran last, with no detection or error.
+- **`accelerate.mkAcceleratedStdenv`'s `granularity = "module"`** has one
+  unguarded gap: two different batched members staging different
+  content at the same relative path silently keep whichever ran last,
+  with no detection or error.
 - **Packages that bake their own not-yet-known `$out` path into every
-  compile flag (openssl's `-DOPENSSLDIR=`/`-DENGINESDIR=`/`-DMODULESDIR=`
-  being the confirmed example) may now be able to demonstrate per-TU
-  caching correctly, unverified** — this was a structural limitation
-  under the earlier `recursive-nix`-based design (a live shim's own
-  `$out` was the OUTER derivation's real, already-known path, which
-  changes whenever ANY outer attribute changes). Under the current
-  `phases.split`-based design, `$out` inside phase 1's own compile
-  commands is a per-UNIT placeholder (`builtins.placeholder`-style, a
-  function of that unit's own content only) — not the final package's
-  real `$out`, which is only computed in phase 2. Whether this actually
-  resolves the openssl case end to end has NOT been directly verified
-  yet against a real build; flagging as a promising, plausible
-  consequence of the redesign rather than a confirmed fix.
-- **`graph.compile` only implements the `builder-rpc-v0` backend** —
-  `recursive-nix` multi-node graphs need their own single-composed-Nix-
-  expression codegen (confirmed to work in principle; not yet built).
-- **`builder-rpc-v0` support needs a Nix build recent enough to have it**
-  (see `try-it-out/patched-nix.nix`, which fetches+builds one directly —
-  no patched fork, no source patching); there is no STABLE RELEASE with
-  this feature yet, so most installed Nix binaries (Determinate,
-  nixos-unstable's pinned Nix, etc.) don't have it out of the box. Nothing
-  that needs it (`graph.compile`, `mkDynamicDerivation`'s default backend)
-  works without one — `capabilities.withFallback` is the escape hatch.
+  compile flag** (openssl's `-DOPENSSLDIR=` etc.) may now work correctly
+  under the current `phases.split`-based design (`$out` inside phase 1
+  is a per-unit placeholder, not the final package's real path) — not
+  yet directly verified against a real build.
+- **`graph.compile` only implements the `builder-rpc-v0` backend** — a
+  `recursive-nix` codegen path is unbuilt.
+- **`builder-rpc-v0` needs a Nix build recent enough to have it** — no
+  stable release includes it yet, so most installed Nix binaries don't
+  have it out of the box; `try-it-out/patched-nix.nix` fetches one
+  directly, or use `capabilities.withFallback` to degrade to IFD.
 
 See `docs/upstream-tracking.md` for which of these trace back to a
-specific open (or recently-closed) NixOS/nix issue, rather than being a
-`dyndrv`-side gap.
+specific NixOS/nix issue, rather than being a `dyndrv`-side gap.

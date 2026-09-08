@@ -37,39 +37,27 @@
       );
 
       # `nix build .#example` (or `.#packages.<system>.example`): the
-      # real, checked-in `example/` C++ project (`main.cc`/`util.cc`/
-      # `util.h`/`Makefile`), accelerated via `dyndrv.accelerate.
-      # mkAcceleratedStdenv` -- `try-it-out/examples/08-accelerate-
-      # example-dir.nix`'s own flake-callable form. `nixPackage` is this
-      # flake's own `nix` input (confirmed, via direct reproduction,
-      # recent enough to support `builder-rpc-v0`/`nix store submit-
-      # output` -- the SAME check `try-it-out/patched-nix.nix`'s own
-      # header comment documents for its own pin) rather than a second,
-      # independently-pinned Nix -- one fewer moving part for anyone
-      # building this specific output.
+      # real, checked-in `example/` C++ project, accelerated via
+      # `dyndrv.accelerate.mkAcceleratedStdenv` -- `try-it-out/examples/
+      # 08-accelerate-example-dir.nix`'s own content, unmodified (that
+      # file already resolves everything it needs via `<nixpkgs>`/
+      # relative imports, exactly like every other example in that
+      # directory; this output just makes it reachable as `.#example`
+      # too).
       #
-      # STILL NEEDS an isolated alt store + this SAME driving Nix to
-      # actually build, exactly like every other `builder-rpc-v0`-gated
-      # output in this repo (`try-it-out/examples/*`) -- the ambient
-      # system Nix daemon doesn't support it, and no `packages.<system>`
-      # wiring changes that structural requirement. Build it the same
-      # way as any other example, just pointed at this flake output
-      # instead of a `-f <file>` path:
+      # STILL NEEDS an isolated alt store + a `builder-rpc-v0`-capable
+      # driving Nix to actually build -- the ambient system Nix daemon
+      # doesn't support it, and no `packages.<system>` wiring changes
+      # that structural requirement. Build it the same way as any other
+      # example, just pointed at this flake output instead of a
+      # `-f <file>` path:
       #
       #   try-it-out/run-nix.sh build --impure --no-link --print-out-paths .#example
-      packages = forAllSystems (system: {
-        example =
-          let
-            pkgs = nixpkgs.legacyPackages.${system};
-            lib = nixpkgs.lib;
-          in
-          import ./try-it-out/examples/08-accelerate-example-dir.nix {
-            inherit pkgs lib;
-            dyndrv = self.lib.${system};
-            nixPackage = nix.packages.${system}.nix;
-            dyndrvShim = import ./rust/dyndrv-shim.nix { inherit pkgs; };
-          };
-      });
+      packages = forAllSystems (
+        _: {
+          example = import ./try-it-out/examples/08-accelerate-example-dir.nix;
+        }
+      );
 
       devShells = forAllSystems (system: {
         # `nix develop .#nixgg` (previously `.#default`): the original
