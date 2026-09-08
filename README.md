@@ -51,36 +51,6 @@ run it via `try-it-out/run-nix.sh`, which fetches a real, unpatched
 NixOS/nix commit that supports it (see that script's own header comment;
 no separate patched fork or meson build step needed).
 
-## Status
-
-Implemented and verified end-to-end against real Nix builds (not just
-designed): core primitives (`mkDynamicDerivation`, `mkOutputOf`,
-`wrapOutputOf`, `capabilities`, both backends), `graph.compile`,
-`shim.wrapCommand`/`collectStubs`, `phases.split`, and
-`accelerate.mkAcceleratedStdenv` — the main adoption lever, built on all
-of the above. See `try-it-out/benchmarks/BASELINE.md` for the numbers.
-
-## Layout
-
-```
-nix/lib/             Core Nix-expression library (the load-bearing part —
-                      works on stock Nix, no compiled tooling required)
-nix/lib/builders/     Backend-specific single-node builder-script generators
-nix/lib/graph/        Whole-dependency-graph compiler (graph.compile) and
-                      its toOutput strategies (assemble, selectSink)
-nix/lib/shim/         $PATH-command interception (wrapCommand) and whole-
-                      build-tree stub resolution (collectStubs)
-nix/lib/phases/       The sandboxed/replay two-derivation split (split.nix)
-nix/lib/accelerate/   The one-line stdenv accelerator, built on shim/+phases/
-nix/tests/            dyndrv's own tests, cross-checked against Nix's oracle
-tests/oracle/         Vendored reference copies of Nix core's own
-                      tests/functional/dyn-drv/ test cases
-try-it-out/           Get-started tooling: a NixOS/nix packaging recipe,
-                      a run-nix.sh wrapper, runnable examples, and benchmarks
-try-it-out/benchmarks/  Reproducible numbers, not just README claims —
-                        see BASELINE.md
-```
-
 ## Quickstart
 
 **Want to accelerate an existing C/C++ package?** No special Nix build
@@ -185,21 +155,6 @@ Runs against the installed system Nix using the `recursive-nix` backend
 (no patched Nix required). Tests are cross-checked against the oracle
 behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
 (vendored under `tests/oracle/`).
-
-## Benchmarks
-
-```console
-$ ./try-it-out/benchmarks/registration-overhead.sh          # metric 3: the per-call "tax"
-$ ./try-it-out/benchmarks/small-lib-patch-rebuild.sh         # metrics 1/2/4: synthetic fixture, real win (and honest loss case)
-$ ./try-it-out/benchmarks/real-package-patch-rebuild.sh      # same metrics against real, unmodified nixpkgs freetype, one file patched
-$ ./try-it-out/benchmarks/real-package-version-bump.sh       # same, but a 3-file patch across 2 subdirectories -- shaped like a real version bump's diff
-```
-
-See `try-it-out/benchmarks/BASELINE.md` for the last-known numbers, kept
-up to date via reviewed PR rather than left to go stale in a README.
-Proving the value proposition, not just asserting it, is a first-class
-goal of this project — see the numbers, run them yourself, and see where
-the tradeoff does *not* favor `dyndrv` too (it's documented, not hidden).
 
 ## Known limitations
 
