@@ -74,3 +74,6 @@ jobs:
 
       - name: devshell-parity-test.sh (Rpc-vs-Sandbox drv-hash parity, real project)
         run: ./rust/dyndrv-shim/devshell-parity-test.sh
+
+      - name: devshell-parity-smalllib-test.sh (Rpc-vs-Sandbox drv-hash parity, 2nd fixture)
+        run: ./rust/dyndrv-shim/devshell-parity-smalllib-test.sh

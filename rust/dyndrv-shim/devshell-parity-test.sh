@@ -3,7 +3,8 @@
 # property `docs/rust-status.md`'s "Cross-mode substitution, confirmed
 # not just designed" section established SYNTHETICALLY
 # (`cross_mode_check.rs`, a one-off Record diff, never checked against a
-# real project) against a REAL checked-in C++ project (`example/`):
+# real project -- now `render::cross_mode_tests`, a permanent `#[test]`
+# suite) against a REAL checked-in C++ project (`example/`):
 # running `make` through `nix/lib/shim/devShell.nix`'s own Rpc-mode
 # wrappers (no sandbox at all) registers the SAME per-translation-unit
 # derivations as a sandboxed `nix build` of the equivalent
@@ -39,6 +40,13 @@
 # `--store "local?root=$DYNDRV_STORE"` explicitly, or it silently
 # resolves against the wrong (ambient) store instead.
 #
+# Shares its actual devShell-build/collect/store-lookup mechanics with
+# devshell-parity-smalllib-test.sh via parity-test-lib.sh (mirrors
+# nixgg's own tests/lib/drv-equiv-common.sh split) -- this script's own
+# body is just its fixture's identity (`example/`, `08-accelerate-
+# example-dir.nix`) plus the functional `hello`-output check that
+# fixture's own single, non-generic final binary makes easy to assert.
+#
 # Usage: rust/dyndrv-shim/devshell-parity-test.sh
 
 set -euo pipefail
@@ -47,70 +55,53 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DYNDRV_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 DYNDRV_STORE="${DYNDRV_STORE:-/tmp/dyndrv-store}"
 
+# shellcheck source=./parity-test-lib.sh
+source "$SCRIPT_DIR/parity-test-lib.sh"
+
 WORKDIR=$(mktemp -d -t dyndrv-devshell-parity-test.XXXXXX)
 trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "building devShell wrapper..." >&2
-WRAPPER_DIR=$(nix build --impure --no-link --print-out-paths --expr '
-  let
-    pkgs = import <nixpkgs> {};
-    lib = pkgs.lib;
-    self = import '"$DYNDRV_ROOT"'/nix { inherit pkgs lib; };
-    dyndrvShim = import '"$DYNDRV_ROOT"'/rust/dyndrv-shim.nix { inherit pkgs; };
-  in (self.shim.devShell { stdenv = pkgs.stdenv; inherit dyndrvShim; autoforce = false; }).wrapperDir
-' 2>/dev/null)
-
-cp "$DYNDRV_ROOT"/example/{main.cc,util.cc,util.h,Makefile} "$WORKDIR/"
-cd "$WORKDIR"
-export PATH="$WRAPPER_DIR/bin:$PATH"
-export CC="$WRAPPER_DIR/bin/cc"
-export CXX="$WRAPPER_DIR/bin/c++"
-export AR="$WRAPPER_DIR/bin/ar"
-export RANLIB="$WRAPPER_DIR/bin/ranlib"
-export DYNDRV_MODE=rpc
+WRAPPER_DIR=$(parity_build_devshell_wrapper)
 
 echo "running make through the devShell wrapper (no autoforce -- registers, doesn't realize)..." >&2
-make
+parity_run_native_build "$WRAPPER_DIR" "$WORKDIR" \
+  "$DYNDRV_ROOT"/example/main.cc "$DYNDRV_ROOT"/example/util.cc \
+  "$DYNDRV_ROOT"/example/util.h "$DYNDRV_ROOT"/example/Makefile
 
+cd "$WORKDIR"
 if [ ! -L main.o ] || [ ! -L util.o ] || [ ! -L hello ]; then
   echo "FAIL: main.o/util.o/hello are not symlinks -- expected deferred Rpc-mode .drv symlinks with DYNDRV_AUTOFORCE unset" >&2
   exit 1
 fi
 
-DEVSHELL_MAIN_O_DRV_BASENAME=$(basename "$(readlink main.o)")
-DEVSHELL_UTIL_O_DRV_BASENAME=$(basename "$(readlink util.o)")
 DEVSHELL_HELLO_DRV_BASENAME=$(basename "$(readlink hello)")
-echo "OK: devShell registered main.o -> $DEVSHELL_MAIN_O_DRV_BASENAME" >&2
-echo "OK: devShell registered util.o -> $DEVSHELL_UTIL_O_DRV_BASENAME" >&2
 
 echo "building the sandboxed dyndrv.accelerate.mkAcceleratedStdenv variant of the same sources..." >&2
 SANDBOXED_OUT=$("$DYNDRV_ROOT/try-it-out/run-nix.sh" build --impure --no-link --print-out-paths \
   -f "$DYNDRV_ROOT/try-it-out/examples/08-accelerate-example-dir.nix" 2>/dev/null)
 
 # THE actual parity check: does the SANDBOXED build's own store
-# (`$DYNDRV_STORE`) contain the devShell's own registered `main.o.drv`/
-# `util.o.drv` paths -- NOT via the outer package derivation's own
-# `--requisites` closure (confirmed by direct reproduction: `dyndrv-
-# collect`'s own per-TU registrations aren't wired as `inputDrvs`/
-# `inputSrcs` edges of the FINAL submitted tree's own derivation, so
-# they never show up in ITS closure at all, even though they're real,
-# independently-registered paths in the SAME store) but via a direct
-# `nix path-info` lookup, confirming the exact path exists as a real,
-# valid store object. If both paths construct byte-identical ATerm for
-# the identical logical compile (the property `docs/rust-status.md`'s
-# "Cross-mode substitution" section established for the shared
-# `record_to_derivation` construction path), the sandboxed build's own
-# `dyndrv-collect` run registers that SAME path too (Nix substitutes/
-# no-ops rather than re-registering under a different name) -- a
-# direct, mechanical check, not an inference from "both builds
-# succeeded."
-for basename in "$DEVSHELL_MAIN_O_DRV_BASENAME" "$DEVSHELL_UTIL_O_DRV_BASENAME"; do
-  if ! nix --store "local?root=$DYNDRV_STORE" path-info "/nix/store/$basename" >/dev/null 2>&1; then
-    echo "FAIL: the sandboxed build's own store does not contain the devShell's own registered $basename -- the two paths registered DIFFERENT derivations for the identical logical compile" >&2
+# (`$DYNDRV_STORE`) contain every TU drv the devShell registered --
+# NOT via the outer package derivation's own `--requisites` closure
+# (see `parity_check_sandbox_has_drv`'s own doc for why) but via a
+# direct `nix path-info` lookup, confirming the exact path exists as a
+# real, valid store object. If both paths construct byte-identical
+# ATerm for the identical logical compile (the property
+# `render::cross_mode_tests` now structurally guarantees via the
+# shared `render_record_line` construction path), the sandboxed
+# build's own `dyndrv-collect` run registers that SAME path too (Nix
+# substitutes/no-ops rather than re-registering under a different
+# name) -- a direct, mechanical check, not an inference from "both
+# builds succeeded."
+while IFS=' ' read -r rel drv_basename; do
+  echo "OK: devShell registered $rel -> $drv_basename" >&2
+  if ! parity_check_sandbox_has_drv "$drv_basename"; then
+    echo "FAIL: the sandboxed build's own store does not contain the devShell's own registered $drv_basename -- the two paths registered DIFFERENT derivations for the identical logical compile" >&2
     exit 1
   fi
-done
-echo "OK: sandboxed build's own store contains the SAME main.o.drv/util.o.drv the devShell registered -- byte-identical derivations, confirmed via direct store lookup" >&2
+done < <(parity_collect_native_tu_drvs "$WORKDIR")
+echo "OK: sandboxed build's own store contains every TU drv the devShell registered -- byte-identical derivations, confirmed via direct store lookup" >&2
 
 # Functional check: realize the devShell's own registered link-step
 # drv (against the AMBIENT store -- Rpc mode never uses an alt store)

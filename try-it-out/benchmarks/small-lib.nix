@@ -9,6 +9,16 @@
 # the version-matching requirement); defaults to the ambient `pkgs.nix`
 # when not set.
 , nixPackagePath ? null
+# The compiled `rust/dyndrv-shim` package, threaded through to
+# `mkAcceleratedStdenv`'s own `dyndrvShim` param -- mirrors examples
+# 05/06/07/08's own identical `dyndrvShim ? null` param. Defaults to
+# `null` (bash `toNodeBash`/`collectStubs` path, unchanged behavior);
+# set to compare this fixture against the compiled shim's own
+# registration naming convention (see `rust/dyndrv-shim/devshell-
+# parity-smalllib-test.sh`, which needs this to compare apples to
+# apples against `nix/lib/shim/devShell.nix`'s own compiled-shim-only
+# wrapper).
+, dyndrvShim ? null
 }:
 
 # The Nix side of small-lib-patch-rebuild.sh: builds a synthetic multi-file
@@ -20,7 +30,7 @@ let
   nixPackage = if nixPackagePath == null then pkgs.nix else builtins.storePath nixPackagePath;
   stdenv =
     if variant == "accelerated" then
-      dyndrv.accelerate.mkAcceleratedStdenv { inherit nixPackage; stdenv = pkgs.stdenv; }
+      dyndrv.accelerate.mkAcceleratedStdenv { inherit nixPackage dyndrvShim; stdenv = pkgs.stdenv; }
     else
       pkgs.stdenv;
 in
