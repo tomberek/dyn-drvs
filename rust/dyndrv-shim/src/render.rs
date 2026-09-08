@@ -216,3 +216,263 @@ where
         outputs,
     }
 }
+
+/// Recovers `cross_mode_check.rs` (a one-off dev-time diff tool, run
+/// once, never checked into the repo -- see `docs/rust-status.md`'s
+/// "Cross-mode substitution" section for the mismatch it originally
+/// caught) as a PERMANENT regression suite: feeds the same synthetic
+/// `Record` shapes through `drv.rs::record_to_derivation` (`Rpc`
+/// mode's own construction) and through this module's `render_member`
+/// (`Sandbox` mode's, via `dyndrv-collect`'s solo-unit path) and
+/// asserts the two produce byte-identical ATerm.
+///
+/// Now that both paths delegate to the ONE shared `render_record_line`
+/// (see that function's own doc comment), these assertions are
+/// expected to hold structurally rather than by coincidence -- this
+/// module exists so a FUTURE change that reintroduces per-call-site
+/// divergence (e.g. a new field added to only one of the four render
+/// call sites) is caught by `cargo test`, not by another one-off
+/// script someone has to remember to write and run by hand.
+#[cfg(test)]
+mod cross_mode_tests {
+    use crate::collect::Stub;
+    use crate::record::{Record, SeedFrom};
+    use crate::render::{render_member, render_record_line};
+    use harmonia_store_aterm::print_derivation_aterm;
+    use harmonia_store_content_address::ContentAddressMethodAlgorithm;
+    use harmonia_store_derivation::derivation::{Derivation, DerivationOutput};
+    use harmonia_store_derivation::derived_path::{OutputName, SingleDerivedPath};
+    use harmonia_store_derivation::placeholder::Placeholder;
+    use harmonia_store_path::{StoreDir, StorePath};
+    use std::collections::HashMap;
+
+    fn out_name() -> OutputName {
+        "out".parse().unwrap()
+    }
+
+    /// A representative already-registered dependency, for cases that
+    /// exercise `deps`-based cross-reference resolution (an `ar`/
+    /// `ranlib` positional arg that's really an earlier compile's own
+    /// drv). The hash is an arbitrary, syntactically valid nix32 store
+    /// hash -- its own VALUE doesn't matter, only that both render
+    /// paths resolve the SAME dependency arg to the SAME placeholder.
+    fn dummy_dep() -> (StorePath, OutputName) {
+        (
+            StorePath::from_base_path("00ljmhbmf3d12aq4l5l7yr7bxn03yqvv-main.o.drv").unwrap(),
+            out_name(),
+        )
+    }
+
+    /// Builds the `Rpc`-side `Derivation` for `record`, via
+    /// `drv.rs::record_to_derivation` -- the exact function `rpc_tail.rs`
+    /// calls in a real devShell registration.
+    fn rpc_side(record: &Record, deps: &HashMap<String, (StorePath, OutputName)>) -> Vec<u8> {
+        let drv = crate::drv::record_to_derivation(record, "cross-mode-check", deps).unwrap();
+        print_derivation_aterm(&StoreDir::default(), &drv)
+    }
+
+    /// Builds the `Sandbox`-side `Derivation` for `record`, via THIS
+    /// module's `render_member` (a single-record, unchained `Stub`) --
+    /// the exact function `dyndrv-collect.rs`'s Phase 7 calls for a
+    /// real solo unit. Deliberately reconstructs the surrounding
+    /// `Derivation` (env/outputs/inputs) by hand here rather than
+    /// calling `dyndrv-collect.rs`'s own Phase-7 code directly, since
+    /// that logic isn't exposed as a library function -- this mirrors
+    /// what `dyndrv-collect.rs` itself does closely enough (same
+    /// `render_member` call, same env/outputs/inputs shape) to be a
+    /// faithful stand-in, and keeps this test from needing a 5th
+    /// generalized entry point solely for its own sake.
+    fn sandbox_side(record: &Record, deps: &HashMap<String, (StorePath, OutputName)>) -> Vec<u8> {
+        let stub = Stub {
+            chain: vec![record.clone()],
+            key: None,
+            deps: Vec::new(),
+            eager_drv: None,
+        };
+        let (setup, cmd, srcs) = render_member(&stub, "$out", |a| {
+            let (dep_drv_path, dep_out_name) = deps.get(a)?;
+            Some(
+                Placeholder::ca_output(dep_drv_path, dep_out_name)
+                    .render()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        });
+        let mut script = setup;
+        script.push_str(&cmd);
+
+        let mut drv = Derivation::new(
+            "cross-mode-check".parse().unwrap(),
+            bytes::Bytes::from_static(b"x86_64-linux"),
+            bytes::Bytes::from_static(b"/bin/sh"),
+        );
+        drv.args = vec![
+            bytes::Bytes::from_static(b"-c"),
+            bytes::Bytes::copy_from_slice(script.as_bytes()),
+        ];
+        let ph = Placeholder::standard_output(&out_name()).render();
+        drv.env.insert(
+            bytes::Bytes::from_static(b"out"),
+            bytes::Bytes::copy_from_slice(ph.as_os_str().as_encoded_bytes()),
+        );
+        drv.outputs.insert(
+            out_name(),
+            DerivationOutput::CAFloating(ContentAddressMethodAlgorithm::NixArchive(
+                harmonia_utils_hash::Algorithm::SHA256,
+            )),
+        );
+        for src_basename in &srcs {
+            if let Ok(sp) = StorePath::from_base_path(src_basename) {
+                drv.inputs.insert(SingleDerivedPath::Opaque(sp));
+            }
+        }
+        for (dep_drv_path, dep_out_name) in deps.values() {
+            drv.inputs.insert(SingleDerivedPath::Built {
+                drv_path: std::sync::Arc::new(SingleDerivedPath::Opaque(dep_drv_path.clone())),
+                output: dep_out_name.clone(),
+            });
+        }
+
+        print_derivation_aterm(&StoreDir::default(), &drv)
+    }
+
+    /// The exact shape that first caught the missing-trailing-`"; "`
+    /// bug this whole test module exists to guard against: a plain
+    /// compile-shaped record, no `deps`, no `seed_from` -- the simplest
+    /// case, and (per `docs/rust-status.md`'s own account) the ONE case
+    /// that happened to still match even with the bug present, since a
+    /// solo unchained record's own missing trailing separator has
+    /// nothing after it to misalign. Kept as a baseline, not because
+    /// it's the interesting case on its own.
+    #[test]
+    fn solo_record_matches() {
+        let record = Record {
+            key: None,
+            tool: "/nix/store/xxx-gcc/bin/cc".to_string(),
+            args: vec!["-c".to_string(), "main.c".to_string(), "-o".to_string(), "$out".to_string()],
+            srcs: vec!["xxx-gcc".to_string()],
+            setup_cmd: None,
+            chained_from: None,
+            seed_from: None,
+        };
+        let deps = HashMap::new();
+        assert_eq!(rpc_side(&record, &deps), sandbox_side(&record, &deps));
+    }
+
+    /// A record referencing an earlier dependency's own drv (the `ar`
+    /// case: `.o` positional args that are really other compiles'
+    /// outputs) -- exercises the `resolve_ref`/`deps`-lookup branch
+    /// both `record_to_derivation` and `render_member`'s caller-supplied
+    /// closure share via `render_record_line`.
+    #[test]
+    fn record_with_dep_reference_matches() {
+        let (dep_path, dep_out) = dummy_dep();
+        let record = Record {
+            key: None,
+            tool: "/nix/store/xxx-binutils/bin/ar".to_string(),
+            args: vec![
+                "rcs".to_string(),
+                "$out".to_string(),
+                "main.o.drv".to_string(),
+            ],
+            srcs: vec!["xxx-binutils".to_string()],
+            setup_cmd: None,
+            chained_from: None,
+            seed_from: None,
+        };
+        let mut deps = HashMap::new();
+        deps.insert("main.o.drv".to_string(), (dep_path, dep_out));
+        assert_eq!(rpc_side(&record, &deps), sandbox_side(&record, &deps));
+    }
+
+    /// A standalone (unchained) record with `seed_from` set -- the
+    /// `ranlib`-shaped case: `$out` must be seeded via `cp`/`chmod`
+    /// BEFORE the tool line runs. This is the shape `ranlib_to_node`
+    /// produces for a solo, non-chained `ranlib` invocation (the ONLY
+    /// caller of `seed_from` today) -- both `record_to_derivation` and
+    /// `render_member` (called with `apply_seed_from = true` for a
+    /// chain's first/only record) must render the identical `cp && ...
+    /// chmod && ...` prelude.
+    #[test]
+    fn standalone_seed_from_matches() {
+        let (dep_path, dep_out) = dummy_dep();
+        let record = Record {
+            key: None,
+            tool: "/nix/store/xxx-binutils/bin/ranlib".to_string(),
+            args: vec!["$out".to_string()],
+            srcs: vec!["xxx-binutils".to_string()],
+            setup_cmd: None,
+            chained_from: None,
+            seed_from: Some(SeedFrom {
+                from: "archive.a.drv".to_string(),
+                coreutils_basename: "yyy-coreutils".to_string(),
+            }),
+        };
+        let mut deps = HashMap::new();
+        deps.insert("archive.a.drv".to_string(), (dep_path, dep_out));
+        assert_eq!(rpc_side(&record, &deps), sandbox_side(&record, &deps));
+    }
+
+    /// A CHAINED pair (`ar` then `ranlib` on the same output) -- the
+    /// exact multi-step-chain shape `docs/rust-status.md` says the
+    /// original bug would have silently broken (a solo record happened
+    /// to still match; only a real chain exposed the missing trailing
+    /// `"; "`). `record_to_derivation` has no chain concept of its own
+    /// (`Rpc`/eager-`Sandbox` modes never defer, so a real `ranlib`
+    /// following a real `ar` always sees an already-real archive, never
+    /// a chain to render) -- this test instead compares `render_member`
+    /// against ITSELF called on the two records independently versus
+    /// as a two-step chain, confirming the chain-rendering concatenation
+    /// itself is exactly "render each step, concatenate, in order" with
+    /// no cross-step interaction beyond that.
+    #[test]
+    fn two_step_chain_is_exact_concatenation() {
+        let ar_record = Record {
+            key: None,
+            tool: "/nix/store/xxx-binutils/bin/ar".to_string(),
+            args: vec!["rcs".to_string(), "$out".to_string(), "main.o".to_string()],
+            srcs: vec!["xxx-binutils".to_string()],
+            setup_cmd: None,
+            chained_from: None,
+            seed_from: None,
+        };
+        let ranlib_record = Record {
+            key: None,
+            tool: "/nix/store/xxx-binutils/bin/ranlib".to_string(),
+            args: vec!["$out".to_string()],
+            srcs: vec!["xxx-binutils".to_string()],
+            setup_cmd: None,
+            chained_from: None,
+            // A CHAINED ranlib's own `seed_from.from` is the stub's OWN
+            // self-referential relative-path text (see `render_member`'s
+            // own doc comment on why `apply_seed_from` is `false` for a
+            // non-first chain step) -- deliberately set here to confirm
+            // it's correctly ignored, not just absent.
+            seed_from: Some(SeedFrom {
+                from: "archive.a".to_string(),
+                coreutils_basename: "yyy-coreutils".to_string(),
+            }),
+        };
+
+        let deps: HashMap<String, (StorePath, OutputName)> = HashMap::new();
+        let chained_stub = Stub {
+            chain: vec![ar_record.clone(), ranlib_record.clone()],
+            key: None,
+            deps: Vec::new(),
+            eager_drv: None,
+        };
+        let (chained_setup, chained_cmd, _) = render_member(&chained_stub, "$out", |a| {
+            deps.get(a).map(|(p, o)| {
+                Placeholder::ca_output(p, o).render().to_string_lossy().into_owned()
+            })
+        });
+
+        let (ar_setup, ar_cmd) =
+            render_record_line(&ar_record, "$out", true, |_| None);
+        let (ranlib_setup, ranlib_cmd) =
+            render_record_line(&ranlib_record, "$out", false, |_| None);
+
+        assert_eq!(chained_setup, format!("{ar_setup}{ranlib_setup}"));
+        assert_eq!(chained_cmd, format!("{ar_cmd}{ranlib_cmd}"));
+    }
+}

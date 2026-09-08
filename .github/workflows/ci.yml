@@ -22,6 +22,21 @@ jobs:
       - name: Verify run-nix.sh can fetch+build a working Nix
         run: ./try-it-out/run-nix.sh --version
 
+      # `rust/dyndrv-shim`'s own unit tests (the `render::cross_mode_tests`
+      # module in particular -- the permanent regression suite for the
+      # Rpc/Sandbox script-construction parity `docs/rust-status.md`'s
+      # "Cross-mode substitution" section describes) had NO CI coverage
+      # at all before this step; a plain `nix shell nixpkgs#cargo
+      # nixpkgs#rustc nixpkgs#gcc --command cargo test` is enough --
+      # the vendored `../vendor/{harmonia,nix-builder-rpc-client}` crates
+      # already resolve via plain relative paths, no Nix build/postPatch
+      # step needed for a `cargo test`-only run (see `rust/dyndrv-shim.nix`'s
+      # own `postPatch`, which only exists for a FULL `nix build`, not this).
+      - name: Run rust/dyndrv-shim's cargo test suite
+        run: |
+          nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc \
+            --command cargo test --manifest-path rust/dyndrv-shim/Cargo.toml
+
       - name: Run nix/tests/run-tests.sh
         run: nix/tests/run-tests.sh
 
