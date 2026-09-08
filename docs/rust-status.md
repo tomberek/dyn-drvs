@@ -156,6 +156,69 @@ output path when actually built — confirmed by direct reproduction, not
 required by this fixture's own assertions, but a reassuring sign of just
 how much further this substitution property extends in practice.
 
+## Cross-mode substitution, proven as REAL reuse, not just hash agreement
+
+Both fixtures above prove the SET of registered TU drv-hashes matches
+between `Rpc` mode and `Sandbox` mode — but neither ever builds anything
+through BOTH paths against the SAME store, so neither can distinguish
+"these two modes would produce the same drv" from "a real substitution
+event happens when one mode's build follows the other's" — nixgg's own
+`tests/cross-mode-reuse.sh` exists specifically to prove the latter,
+stronger property, and dyndrv had no equivalent until now
+(`rust/dyndrv-shim/cross-mode-reuse.sh`).
+
+**The missing mechanism, found by direct reproduction**: `Rpc` mode's
+`BuilderRpcClient::connect_from_env()` always connects to the AMBIENT
+system daemon — there was no way to point a devShell-side registration
+at the SAME isolated alt store `try-it-out/run-nix.sh`'s own sandboxed
+side drives, so the two paths had no shared store a real substitution
+could even happen in. Fixed by running a separate, PRIVATE `nix daemon
+--socket-path <sock> --store 'local?root=<dir>'` (a real, documented
+Nix flag already present on the `patched-nix.nix` build this repo
+depends on for `builder-rpc-v0` — not a workaround) and pointing the
+native side's `NIX_REMOTE` at that socket while pointing `DYNDRV_STORE`
+at the same directory the sandboxed side drives.
+
+**Two things confirmed necessary by direct reproduction, not assumed**:
+1. The private store must be seeded with the devShell wrapper's own
+   closure (`nix copy`) BEFORE registering anything — a compile's own
+   `record.srcs` declares coreutils/`stdenv.cc`/etc. as real store-path
+   references, and `add_drv_to_store`'s reference-scanning requires
+   each to already be a valid object in the TARGET store. Without this,
+   the very first registration attempt failed outright ("path ... is
+   not valid").
+2. The native side's two TU drvs must be explicitly `nix-store
+   --realise`d against the private daemon (mirroring `NIXGG_AUTOFORCE=1`/
+   `nixgg force`) BEFORE the sandboxed build runs — confirmed by direct
+   reproduction that skipping this makes the whole check vacuous: the
+   sandboxed build's own log then legitimately shows `building
+   'main.o.drv'`/`'util.o.drv'` (a correct realize-for-the-first-time
+   event, not a substitution failure), so "absent from the building
+   log" only means anything once there's real content in the store
+   FIRST for the sandboxed side to find instead.
+
+With both steps in place, a full sandboxed `nix build` of
+`08-accelerate-example-dir.nix` against that same store shows NEITHER
+TU drv in its own `building '...'` lines — genuine reuse, not matching
+hashes that happen to never get exercised. Verified this assertion is
+meaningful (not a false positive from the two drvs simply being
+irrelevant) by a negative-control run: skipping the realize step
+reproduces the exact `building 'main.o.drv'`/`'util.o.drv'` lines the
+real run's own absence is checked against.
+
+**A known, documented gap, not silently glossed over**: nixgg's own
+`cross-mode-reuse.sh` also confirms the sandbox build's own drv graph
+references the native-built paths via `inputDrvs`. That check doesn't
+map onto dyndrv's architecture — the final submitted tree copies bytes
+via resolved PLACEHOLDER TEXT at script-generation time (`graph/
+compile.nix`'s bash port of `DownstreamPlaceholder::unknownCaOutput`,
+`dyndrv-collect.rs`'s Rust equivalent), not `inputDrvs` edges, confirmed
+directly (`nix derivation show -r` on the final tree never lists
+`main.o.drv`/`util.o.drv`, even on a run where they WERE substituted).
+The "absent from the building log, but only meaningful after forcing
+real content to exist first" structure above is the correct substitute
+for dyndrv's own architecture, not a lesser version of nixgg's check.
+
 ## Experimental finding: a `.drv` file needs `nix-store --add` before
 ## it can be realized (task #65)
 

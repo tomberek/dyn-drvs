@@ -77,3 +77,6 @@ jobs:
 
       - name: devshell-parity-smalllib-test.sh (Rpc-vs-Sandbox drv-hash parity, 2nd fixture)
         run: ./rust/dyndrv-shim/devshell-parity-smalllib-test.sh
+
+      - name: cross-mode-reuse.sh (proves real substitution, not just hash agreement)
+        run: ./rust/dyndrv-shim/cross-mode-reuse.sh
