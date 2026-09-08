@@ -29,15 +29,14 @@ use std::collections::HashMap;
 /// handles this correctly for exactly this reason.
 ///
 /// The rendered command line's OWN shape (per-record `tool args; `,
-/// literal `"$out"` sentinel left unquoted) mirrors `render.rs`'s
-/// `render_member` exactly -- confirmed necessary by direct
-/// reproduction (`cross_mode_check.rs`): a mismatched trailing `"; "`
-/// between this function and `render_member`'s own chain-concatenation
-/// convention produced two DIFFERENT ATerm byte strings for the
-/// logically-identical single-record case, which would have silently
-/// broken cross-mode store-path agreement for any real, multi-step
-/// chain (only a solo, unchained record happens to still match without
-/// this).
+/// literal `"$out"` sentinel left unquoted) is `render.rs::
+/// render_record_line`'s -- this function is now a thin `deps`-lookup
+/// wrapper around that ONE shared renderer, not an independent
+/// reimplementation of it (see that function's own doc comment for why:
+/// a mismatched trailing `"; "` between this call site and
+/// `render_member`'s own chain-concatenation convention, caught by
+/// `cross_mode_check.rs`, once produced two DIFFERENT ATerm byte
+/// strings for the logically-identical single-record case).
 ///
 /// `args`: the record's own `args`, with the literal `"$out"` sentinel
 /// already resolved by the CALLER to the real output name token
@@ -68,67 +67,18 @@ pub fn record_to_derivation(
         bytes::Bytes::from_static(b"/bin/sh"),
     );
 
-    let mut script = String::new();
-    if let Some(setup) = &record.setup_cmd {
-        script.push_str(setup);
-    }
-    // A `seed_from` reference (`ranlib_to_node`'s own "index this
-    // archive in place" need) must be copied into `$out` BEFORE the
-    // tool line below runs -- resolved the SAME way an `args` element
-    // is: a `deps` match (an earlier, already-registered-but-not-yet-
-    // realized invocation, e.g. eager `Sandbox`/`Rpc` mode's own `ar`
-    // step) becomes a real placeholder token; an already-real
-    // `/nix/store/...` literal is used as-is. Confirmed necessary by
-    // direct reproduction: the ORIGINAL version of this function had no
-    // `seed_from` handling at all, so a standalone `ranlib` registered
-    // with `$out` never populated and NO `inputDrvs` edge to the
-    // archive's own derivation -- silently producing an empty archive
-    // rather than indexing the real one.
-    if let Some(seed) = &record.seed_from {
-        let source_token = if let Some((dep_drv_path, dep_out_name)) = deps.get(&seed.from) {
+    let resolve_ref = |a: &str| -> Option<String> {
+        let (dep_drv_path, dep_out_name) = deps.get(a)?;
+        Some(
             Placeholder::ca_output(dep_drv_path, dep_out_name)
                 .render()
                 .to_string_lossy()
-                .into_owned()
-        } else {
-            seed.from.clone()
-        };
-        // `chmod u+w` AFTER the `cp`, not before -- `cp` preserves the
-        // read-only Nix store source's permissions on the destination,
-        // so `ranlib` (which modifies the archive IN PLACE) fails
-        // outright without this ("unable to copy file '...'; reason:
-        // Permission denied" -- confirmed by direct reproduction).
-        script.push_str(&format!(
-            "/nix/store/{cu}/bin/cp {} $out && /nix/store/{cu}/bin/chmod u+w $out && ",
-            crate::render::shell_quote(&source_token),
-            cu = seed.coreutils_basename,
-        ));
-    }
-    script.push_str(&record.tool);
-    for a in &record.args {
-        script.push(' ');
-        // The literal sentinel "$out" must stay UNQUOTED so the
-        // builder's own shell expands it -- confirmed by direct
-        // reproduction: quoting it (`'$out'`) makes `/bin/sh -c`
-        // pass the literal three-character string through unexpanded,
-        // so the builder wrote to a file actually named `$out` instead
-        // of the real output path, and Nix reported "failed to
-        // produce output path" with no further explanation. Mirrors
-        // `render.rs`'s own `render_member`, which already special-
-        // cases this same sentinel the same way.
-        if a == "$out" {
-            script.push_str(a);
-        } else if let Some((dep_drv_path, dep_out_name)) = deps.get(a) {
-            let ph = Placeholder::ca_output(dep_drv_path, dep_out_name).render();
-            script.push_str(&crate::render::shell_quote(&ph.to_string_lossy()));
-        } else {
-            script.push_str(&crate::render::shell_quote(a));
-        }
-    }
-    // `render_member`'s own per-chain-step convention ALWAYS appends
-    // "; " after each record (see that function's own loop) -- matched
-    // here so a solo record renders byte-identically either way.
-    script.push_str("; ");
+                .into_owned(),
+        )
+    };
+    let (setup, cmd) = crate::render::render_record_line(record, "$out", true, resolve_ref);
+    let mut script = setup;
+    script.push_str(&cmd);
 
     drv.args = vec![
         bytes::Bytes::from_static(b"-c"),

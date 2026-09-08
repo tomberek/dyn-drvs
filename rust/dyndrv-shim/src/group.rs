@@ -1,5 +1,4 @@
 use crate::record::Record;
-use crate::render::shell_quote;
 use anyhow::Context;
 use harmonia_store_content_address::ContentAddressMethodAlgorithm;
 use harmonia_store_derivation::derivation::{Derivation, DerivationOutput};
@@ -122,39 +121,23 @@ fn append_member(
 ) -> anyhow::Result<()> {
     let own_out_var = format!("${member_out_name}");
 
-    let mut script = String::new();
-    if let Some(setup) = &record.setup_cmd {
-        script.push_str(setup);
-    }
-    if let Some(seed) = &record.seed_from {
-        let source_token = if let Some((dep_drv_path, dep_out_name)) = deps.get(&seed.from) {
+    // See `drv.rs::record_to_derivation`'s identical `resolve_ref` for
+    // the full rationale -- all four of dyndrv's script-construction
+    // call sites now delegate to the ONE shared `render.rs::
+    // render_record_line` renderer instead of each independently
+    // reimplementing the setup_cmd/seed_from/tool-args/`"; "` pattern.
+    let resolve_ref = |a: &str| -> Option<String> {
+        let (dep_drv_path, dep_out_name) = deps.get(a)?;
+        Some(
             Placeholder::ca_output(dep_drv_path, dep_out_name)
                 .render()
                 .to_string_lossy()
-                .into_owned()
-        } else {
-            seed.from.clone()
-        };
-        script.push_str(&format!(
-            "/nix/store/{cu}/bin/cp {} {out} && /nix/store/{cu}/bin/chmod u+w {out} && ",
-            shell_quote(&source_token),
-            cu = seed.coreutils_basename,
-            out = own_out_var,
-        ));
-    }
-    script.push_str(&record.tool);
-    for a in &record.args {
-        script.push(' ');
-        if a == "$out" {
-            script.push_str(&own_out_var);
-        } else if let Some((dep_drv_path, dep_out_name)) = deps.get(a) {
-            let ph = Placeholder::ca_output(dep_drv_path, dep_out_name).render();
-            script.push_str(&shell_quote(&ph.to_string_lossy()));
-        } else {
-            script.push_str(&shell_quote(a));
-        }
-    }
-    script.push_str("; ");
+                .into_owned(),
+        )
+    };
+    let (setup, cmd) = crate::render::render_record_line(record, &own_out_var, true, resolve_ref);
+    let mut script = setup;
+    script.push_str(&cmd);
 
     // Appended, not replaced -- an EARLIER member's own script line
     // must still run when a LATER member's derivation is realized,

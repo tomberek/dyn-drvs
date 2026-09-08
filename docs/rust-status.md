@@ -67,13 +67,35 @@ and diffed the raw ATerm bytes both produce. First attempt: MISMATCH —
 `render_member`'s chain-rendering convention always appends, which
 would have silently broken cross-mode store-path agreement for any
 multi-step chain even though a solo record happened to still match.
-Fixed to match byte-for-byte. This is the concrete, mechanical reason a
-TU registered by hand in a devShell and the same TU registered inside a
-sandboxed `nix build` land at the same content-addressed store path —
-not a separately-maintained equivalence test (nixgg's own
+Fixed to match byte-for-byte at the time, but by hand-editing two
+independently-written functions to agree — not yet a structural
+guarantee, since nothing stopped a later edit to one from silently
+drifting away from the other again (which is exactly the mechanism the
+first mismatch demonstrates: it's not a hypothetical risk).
+
+**Since made structural**: `record_to_derivation`, `render_member`,
+`drv_thunk.rs::write_drv_thunk`, and `group.rs::append_member` were four
+independently-written copies of this same setup_cmd/seed_from/tool-args/
+`"; "` script-rendering pattern. All four now delegate to one function,
+`render.rs::render_record_line`, for the single-record rendering step —
+so agreement between the Rpc (`record_to_derivation`) and Sandbox
+(`render_member`/`render_unit`) construction paths is compiler-enforced
+(the same code runs either way), not re-verified by a one-off diff tool
+or hand-kept in sync by convention. This is the concrete, mechanical
+reason a TU registered by hand in a devShell and the same TU registered
+inside a sandboxed `nix build` land at the same content-addressed store
+path — not a separately-maintained equivalence test (nixgg's own
 `tests/drv-equivalence.sh` exists specifically because ITS native/
-sandbox code paths are NOT unified this way), a structural property of
-sharing one construction path.
+sandbox code paths are NOT unified this way), a genuinely structural
+property of sharing one construction path now, matching nixgg's own
+`toolchainEnv`/`scrubWrapperEnv` model of "one string, fed into both
+sides" rather than "two strings, kept in sync by testing."
+
+Re-verified end to end after this unification via
+`rust/dyndrv-shim/devshell-parity-test.sh` (Rpc-vs-Sandbox, `example/`'s
+real TUs) and `try-it-out/examples/06-accelerate-stdenv-module.nix` with
+`dyndrvShim` set (exercises `group.rs::append_member`'s own batched
+path) — both pass, confirming the refactor is behavior-preserving.
 
 ## Cross-mode substitution, verified against a REAL project
 
