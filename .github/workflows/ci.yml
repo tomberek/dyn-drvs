@@ -56,3 +56,6 @@ jobs:
 
       - name: small-lib-patch-rebuild.sh regression check
         run: ./try-it-out/benchmarks/small-lib-patch-rebuild.sh 10 300
+
+      - name: devshell-parity-test.sh (Rpc-vs-Sandbox drv-hash parity, real project)
+        run: ./rust/dyndrv-shim/devshell-parity-test.sh
