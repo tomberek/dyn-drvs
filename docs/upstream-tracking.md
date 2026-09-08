@@ -22,11 +22,12 @@ dependency for several projects, per the plan's own adoption goal).
   -- that's the one place the DETECTED (not just assumed) answer could
   change, once a real out-of-band probe (`dyndrv doctor`) exists.
 - **#12727**: if this lands, re-check whether `graph.compile`'s own
-  hand-rolled multi-node placeholder chaining (`dyndrv.placeholder`,
-  ported to bash for the `builder-rpc-v0` sandbox) could be simplified or
+  hand-rolled multi-node placeholder chaining (a bash port of Nix's own
+  `DownstreamPlaceholder::unknownCaOutput` formula, `sha256("nix-
+  upstream-output:...")`, converted to nix32) could be simplified or
   replaced by whatever general join operation the issue's resolution
-  provides — that Rust/bash port exists specifically because Nix itself
-  doesn't yet expose one.
+  provides — that bash port exists specifically because Nix itself
+  doesn't yet expose one from inside a `builder-rpc-v0` sandbox.
 
 ## Why track this at all
 

@@ -15,9 +15,7 @@ let
     capabilities = callLib ./lib/capabilities.nix;
     mkArgs = callLib ./lib/mkArgs.nix;
     mkOutputOf = callLib ./lib/mkOutputOf.nix;
-    wrapOutputOf = callLib ./lib/wrapOutputOf.nix;
     mkDynamicDerivation = callLib ./lib/mkDynamicDerivation.nix;
-    placeholder = callLib ./lib/placeholder.nix;
 
     builders = {
       viaNixInstantiate = callLib ./lib/builders/viaNixInstantiate.nix;
@@ -26,8 +24,6 @@ let
 
     graph = {
       topoSort = callLib ./lib/graph/topoSort.nix;
-      assemble = callLib ./lib/graph/assemble.nix;
-      selectSink = callLib ./lib/graph/selectSink.nix;
       compile = callLib ./lib/graph/compile.nix;
       groupByDirectory = callLib ./lib/graph/groupByDirectory.nix;
     };

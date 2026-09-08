@@ -107,10 +107,8 @@ dyndrv.mkDynamicDerivation {
 | `dyndrv.mkDynamicDerivation` | The `mkDerivation`-shaped wrapper around the outer-drv + `outputOf`-unwrap pattern found in every surveyed project. Returns an ordinary, immediately-usable derivation. `backend` defaults to `"builder-rpc-v0"`; pass `"auto"` for the eval-time-detected choice instead, or `"recursive-nix"` to force it. Check `passthru.backend` to confirm what was selected. |
 | `dyndrv.builders.viaNixInstantiate` / `.viaDerivationAdd` | The two backend-specific ways a single `producer` can construct its inner derivation (`recursive-nix` + `nix-instantiate`, vs. `builder-rpc-v0` + `nix derivation add`/`nix store submit-output`). |
 | `dyndrv.capabilities.detect` / `.withFallback` | Feature detection and a graceful degrade-to-IFD combinator, so adopting `dyndrv` is never an all-or-nothing bet on an experimental Nix feature. |
-| `dyndrv.mkOutputOf` / `dyndrv.wrapOutputOf` | Low-level helpers that paper over `builtins.outputOf`'s two permanent rough edges (string-only argument, `DrvDeep`-context rejection) and turn a raw `outputOf` string into something `nix run`/`nix profile install` can consume. |
-| `dyndrv.placeholder` | Pure-Nix implementation of `DownstreamPlaceholder::unknownCaOutput`, verified byte-for-byte against Nix's own computed placeholder — the exact formula gradle-drvs hand-reimplemented in bash. |
-| `dyndrv.graph.compile` | Compiles a whole dependency graph (many nodes, each possibly depending on other nodes' not-yet-built outputs) into ONE outer submission — `builder-rpc-v0` backend. Optional per-node `group` field merges nodes sharing a `group` string into one registered derivation. See `try-it-out/examples/03-graph-with-groups.nix`. |
-| `dyndrv.graph.assemble` / `.selectSink` | The two `toOutput` strategies `graph.compile` supports: merge every node's output into one tree, or return one named "sink" node's output directly. |
+| `dyndrv.mkOutputOf` | Low-level helper that papers over `builtins.outputOf`'s two permanent rough edges (string-only argument, `DrvDeep`-context rejection). |
+| `dyndrv.graph.compile` | Compiles a whole dependency graph (many nodes, each possibly depending on other nodes' not-yet-built outputs) into ONE outer submission — `builder-rpc-v0` backend. Optional per-node `group` field merges nodes sharing a `group` string into one registered derivation. `toOutput` (default `"assemble"`, merges every node's output into one tree; or `{ sink = "<nodeName>"; }`, returns one node's output directly) picks how the graph's many outputs become one. See `try-it-out/examples/03-graph-with-groups.nix`. |
 | `dyndrv.graph.groupByDirectory` | Canned `group`-assignment helper: sets each node's `group` to its own path's directory. See `try-it-out/examples/03-graph-groupby-directory.nix`. |
 | `dyndrv.shim.wrapCommand` | Intercepts a toolchain command on `$PATH` so every invocation defers — writes a batch-pending stub instead of running, returning instantly (`builder-rpc-v0` cannot realize a derivation from inside a running script). What `accelerate.mkAcceleratedStdenv` is built from. |
 | `dyndrv.shim.collectStubs` | Runs once at the end of a build: walks the tree of deferred stubs, reconstructs the dependency graph, registers one derivation per unit, and submits a fully-resolved tree. |
@@ -141,9 +139,6 @@ per-function bespoke API:
 - `passthru.backend` — which backend was actually selected
   (`"builder-rpc-v0"` or `"recursive-nix"`), so a caller can assert on it
   in tests without re-running `capabilities.detect`.
-
-`dyndrv.wrapOutputOf`'s result exposes `passthru.outputOf` only (there is
-no outer wrapper derivation in that lower-level case).
 
 ## Running the tests
 

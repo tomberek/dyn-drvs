@@ -318,10 +318,11 @@ let
 
   finalUnitKey = "__dyndrv_final";
 
-  # Bash port of DownstreamPlaceholder::unknownCaOutput, matching the
-  # pure-Nix formula in placeholder.nix -- `nix hash convert` is used
-  # here (unlike placeholder.nix's `builtins.convertHash`) since this
-  # runs inside the bash builder script, not Nix-expression eval.
+  # Bash port of DownstreamPlaceholder::unknownCaOutput (verified by
+  # direct reproduction against Nix's own computed placeholder for a
+  # real CA derivation) -- `nix hash convert` is used here since this
+  # runs inside the bash builder script, not Nix-expression eval, where
+  # `builtins.convertHash` isn't reachable.
   placeholderBashFn = ''
     dyndrv_placeholder() {
       local drvPath="$1" outputName="''${2:-out}"
