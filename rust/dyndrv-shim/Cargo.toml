@@ -3,25 +3,49 @@ name = "dyndrv-shim"
 version = "0.1.0"
 edition = "2021"
 
-# `nix-builder-rpc-client` is vendored at ../vendor/nix-builder-rpc-client
-# (pinned to nix-ninja commit 9a07e67, with one local addition --
-# `add_to_store_flat`, needed for byte-identical parity with `nix store
-# add-file`'s own default Flat CA method, which upstream never needed).
-# `harmonia-*` is vendored at ../vendor/harmonia, pinned to the exact
-# commit (b7c7777) nix-ninja's OWN committed Cargo.lock records for that
-# rev -- harmonia's `main` HEAD has since diverged incompatibly
-# (confirmed directly: HEAD's `print_derivation_aterm` signature no
-# longer matches what this pinned nix-builder-rpc-client rev expects).
-# See docs/rust-status.md for the full "why vendor, not a git dep" story.
+# `harmonia-*` and `nix-builder-rpc-client` are real `git` dependencies,
+# not vendored copies -- confirmed by direct diff against a real cargo
+# checkout that every vendored `harmonia-*` file was already byte-
+# identical to upstream at this exact pinned commit, so nothing is lost
+# by depending on it directly (`Cargo.lock`'s own commit-pinning gives
+# the same reproducibility a vendored copy did, without a local copy to
+# keep in sync).
+#
+# `rev`, not `branch`, for harmonia: harmonia's `main` HEAD has
+# genuinely diverged incompatibly since this commit was pinned
+# (confirmed directly, re-checked against a fresh clone of current
+# main: `print_derivation_aterm`'s own generic bound changed from
+# unconstrained `I` to `K: AtermInput`) -- `branch = "main"` would float
+# onto that break the next time `Cargo.lock` gets regenerated.
+#
+# `nix-builder-rpc-client` points at tomberek/nix-ninja's own
+# `dyndrv-consumption` branch, not `pdtpartners/nix-ninja` directly, for
+# two independent reasons:
+#   1. It has two small, additive local methods (`add_to_store_flat`,
+#      `is_valid_path`) not yet in pdtpartners/nix-ninja upstream -- see
+#      https://github.com/pdtpartners/nix-ninja/pull/57. Switch to
+#      `pdtpartners/nix-ninja` directly once/if that PR merges.
+#   2. Its own `Cargo.toml` pins harmonia-* to the SAME exact commit as
+#      this file's own direct harmonia-* deps below, instead of
+#      inheriting nix-ninja's own workspace-wide `branch = "main"` --
+#      confirmed necessary by direct reproduction: without this, Cargo
+#      resolves TWO different copies of `harmonia-store-aterm` (one
+#      from this crate's own rev-pinned dependency, one from
+#      `nix-builder-rpc-client`'s own transitive branch-pinned one) and
+#      fails to compile (harmonia's main has diverged incompatibly, see
+#      above). This pin is dyndrv-specific plumbing, deliberately kept
+#      on ITS OWN branch (dyndrv-consumption) separate from the
+#      upstream PR branch (add-store-flat-and-is-valid-path), since
+#      nix-ninja itself intentionally floats on harmonia's main as part
+#      of its own workspace convention.
 [dependencies]
-nix-builder-rpc-client = { path = "../vendor/nix-builder-rpc-client" }
-harmonia-store-derivation = { path = "../vendor/harmonia/harmonia-store-derivation" }
-harmonia-store-path = { path = "../vendor/harmonia/harmonia-store-path" }
-harmonia-store-content-address = { path = "../vendor/harmonia/harmonia-store-content-address" }
-harmonia-store-aterm = { path = "../vendor/harmonia/harmonia-store-aterm" }
-harmonia-utils-hash = { path = "../vendor/harmonia/harmonia-utils-hash" }
+nix-builder-rpc-client = { git = "https://github.com/tomberek/nix-ninja", branch = "dyndrv-consumption" }
+harmonia-store-derivation = { git = "https://github.com/nix-community/harmonia.git", rev = "b7c7777f422ff42ce637f6b2f356c2dbac2d3db4" }
+harmonia-store-path = { git = "https://github.com/nix-community/harmonia.git", rev = "b7c7777f422ff42ce637f6b2f356c2dbac2d3db4" }
+harmonia-store-content-address = { git = "https://github.com/nix-community/harmonia.git", rev = "b7c7777f422ff42ce637f6b2f356c2dbac2d3db4" }
+harmonia-store-aterm = { git = "https://github.com/nix-community/harmonia.git", rev = "b7c7777f422ff42ce637f6b2f356c2dbac2d3db4" }
+harmonia-utils-hash = { git = "https://github.com/nix-community/harmonia.git", rev = "b7c7777f422ff42ce637f6b2f356c2dbac2d3db4" }
 anyhow = "1.0"
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-

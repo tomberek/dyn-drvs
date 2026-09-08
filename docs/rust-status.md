@@ -699,6 +699,54 @@ thunk. Now resolved, mirroring `Thunk{Drv}`'s own multi-node story
   `ar-integration-test`, `collect-integration-test`, and examples 05/06
   all re-verified unchanged.
 
+## `harmonia-*`/`nix-builder-rpc-client`: un-vendored, real git dependencies now
+
+`rust/vendor/{harmonia,nix-builder-rpc-client}` (a local copy of both,
+checked into this repo) is gone. Confirmed by direct diff against a
+real cargo checkout that every one of the 14 vendored `harmonia-*`
+subcrates was already byte-identical to upstream `nix-community/
+harmonia` at the exact commit (`b7c7777`) this repo had pinned — so
+nothing was lost switching to a real `git` dependency (`rev`-pinned,
+not `branch`-pinned: harmonia's own `main` HEAD has genuinely diverged
+incompatibly since that commit, confirmed directly against a fresh
+clone — `print_derivation_aterm`'s own generic bound changed).
+
+`nix-builder-rpc-client` couldn't just point at `pdtpartners/nix-ninja`
+directly — it carries two small, additive local methods
+(`add_to_store_flat`, `is_valid_path`) not present upstream, confirmed
+by direct diff against nix-ninja's own repo at the same pinned commit.
+Both were upstreamed as a real PR
+(https://github.com/pdtpartners/nix-ninja/pull/57); until/unless it
+merges, `dyndrv-shim/Cargo.toml` points at a personal fork's branch
+carrying them.
+
+**A real, structural gotcha found by direct reproduction, not
+theoretical**: `nix-builder-rpc-client`'s own `Cargo.toml` declares its
+harmonia deps as `branch = "main"` (nix-ninja's own workspace
+convention) — a plain `cargo generate-lockfile` against dyndrv-shim's
+own `rev`-pinned harmonia deps resolved TWO different, incompatible
+copies of `harmonia-store-aterm` (one per pinning strategy) and failed
+to compile. Cargo's `[patch]` mechanism can't fix this cleanly here
+(can't patch a source against itself). The actual fix: a SEPARATE
+branch on the personal fork (`dyndrv-consumption`, distinct from the
+PR branch) where `nix-builder-rpc-client`'s own `Cargo.toml` is edited
+to pin harmonia via the same exact `rev`, not inherited `branch =
+"main"` — so both dyndrv-shim's own direct deps and this crate's
+transitive ones resolve to one identical commit.
+
+`rust/dyndrv-shim.nix`'s own `postPatch` (which used to `cp -r` the
+vendor directories into place before a build) is gone too —
+`buildRustPackage`'s `cargoLock.outputHashes` (keyed `"<name>-
+<version>"`, one entry per distinct git commit referenced, covering
+every OTHER crate from the same repo+rev automatically) is all a git
+dependency needs.
+
+Re-verified end-to-end after the switch: `cargo build`/`test`/`clippy`
+clean, a full `nix build -f rust/dyndrv-shim.nix` succeeds, and
+`devshell-parity-test.sh`/example 06 (compiled, batched)/`cross-mode-
+reuse.sh` all still pass, each landing on the exact same store-path
+hashes as before the migration.
+
 ## What's still follow-on work
 
 - No new eager-mode-specific Nix-level regression fixture exists yet

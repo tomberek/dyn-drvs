@@ -27,11 +27,10 @@ jobs:
       # Rpc/Sandbox script-construction parity `docs/rust-status.md`'s
       # "Cross-mode substitution" section describes) had NO CI coverage
       # at all before this step; a plain `nix shell nixpkgs#cargo
-      # nixpkgs#rustc nixpkgs#gcc --command cargo test` is enough --
-      # the vendored `../vendor/{harmonia,nix-builder-rpc-client}` crates
-      # already resolve via plain relative paths, no Nix build/postPatch
-      # step needed for a `cargo test`-only run (see `rust/dyndrv-shim.nix`'s
-      # own `postPatch`, which only exists for a FULL `nix build`, not this).
+      # nixpkgs#rustc nixpkgs#gcc --command cargo test` is enough -- its
+      # `harmonia-*`/`nix-builder-rpc-client` deps are real `git`
+      # dependencies (see Cargo.toml's own header comment), which cargo
+      # fetches itself; no vendor-copy/postPatch step to worry about here.
       - name: Run rust/dyndrv-shim's cargo test suite
         run: |
           nix shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc \
