@@ -747,8 +747,112 @@ clean, a full `nix build -f rust/dyndrv-shim.nix` succeeds, and
 reuse.sh` all still pass, each landing on the exact same store-path
 hashes as before the migration.
 
+## Accelerating a real component of Nix's own build (nix-util)
+
+New example, `try-it-out/examples/09-accelerate-nix-util.nix`: points
+`dyndrv.accelerate.mkAcceleratedStdenv` at NixOS/nix's own `nix-util`
+component (~76 real `.cc` translation units, meson+ninja) — the first
+time this accelerator has run against a meson project, a multi-
+component nixpkgs scope, or anything at this scale. Getting there
+surfaced five real, previously-undiscovered bugs, all now fixed (and
+regression-tested via `nix/tests/run-tests.sh` + the compiled shim's
+own `cargo test`/`clippy`, unchanged before/after):
+
+1. **Stub self-reference substitution** (`collectStubs.nix`'s
+   `dyndrv_render_member`, and `render.rs`'s `render_member`): a
+   compile's own `-MQ <objpath>` alongside `-o <objpath>` (ninja/meson
+   both emit this pair, naming the IDENTICAL literal path) was
+   substituted with the generic cross-reference token instead of
+   `$out`/`own_out_var`, since a compile's own output path is itself a
+   discovered stub the moment its `.o` gets written. Fixed by checking
+   "is this argv element MYSELF" before the generic same-unit lookup,
+   in both the bash and Rust renderers.
+2. **`../`-escaping tree staging** (`wrapCommand.nix`'s discoverTree
+   staging loop, and `wrapper.rs`'s `stage_tree`): meson always
+   compiles from a build subdirectory one level below the source root
+   (`-c ../hash.cc`), a path a Nix store tree can't represent directly
+   (`treeDir/../hash.cc` resolves OUTSIDE `treeDir` at the filesystem
+   level, so `nix store add`/`add_to_store_nar` never see it). Fixed
+   by staging into a nested `.dyndrv-cwd/` chain (depth = the max
+   leading-`../` count for that invocation) and having the eventual
+   builder `cd` into the matching depth before running the real
+   command — carried as a new `chdir` record field (not baked into
+   `setupCmd` as a bare `cd`, which would leak across a merged unit's
+   own sibling members).
+3. **Missing wrapper-env-var store-path declarations**
+   (`mkAcceleratedStdenv.nix`'s `toNode`): nixpkgs' cc-wrapper/
+   bintools-wrapper setup hooks inject extra flags (e.g. boost's own
+   `-isystem <path>/include`) via env vars (`NIX_CFLAGS_COMPILE`,
+   `NIX_LDFLAGS`, ...), not literal argv — invisible to the old argv-
+   only store-path scan, so `#include <boost/format.hpp>` failed even
+   though boost IS a real `propagatedBuildInput`. Fixed by capturing
+   an allowlist of these vars (bare + `stdenv.cc.suffixSalt`-suffixed
+   forms, PLUS the `NIX_CC_WRAPPER_TARGET_HOST`/`NIX_BINTOOLS_
+   WRAPPER_TARGET_HOST`-style role markers `add-flags.sh` itself needs
+   present before it copies the bare var into the salted one gcc
+   actually reads) and re-exporting them in `setupCmd`, and extending
+   the store-path scan to also cover their VALUES (via
+   `builtins.split`, since `builtins.match` only returns the first
+   match in a string with many concatenated `-isystem` flags). Had to
+   also exclude the derivation's OWN self-referential CA output
+   placeholder (e.g. `NIX_LDFLAGS`'s own `-rpath $out/lib`, already
+   substituted to placeholder text by env-construction time) from
+   that scan — a `*.drv`-suffixed basename is never a legitimate
+   `srcs` reference, so filtering on that suffix excludes it safely.
+4. **Missing `.dyndrv-cwd` directory**: the per-file staging loop only
+   ever created directories via each staged file's own `dirname` — if
+   an invocation's own `../`-depth came entirely from files OTHER than
+   the one being compiled (e.g. `checked-arithmetic.cc` itself has no
+   `../` prefix, but sibling `-I../include` flags still drove
+   `up_depth = 1` for the whole invocation), nothing ever staged
+   AT that nesting level, so the directory itself was never created —
+   the builder's own unconditional `cd .dyndrv-cwd/` then failed
+   outright. Fixed by unconditionally creating the full nested chain
+   up front, before the per-file staging loop runs.
+5. **Missing output directory for `-MF` dependency-file writes**: a
+   real (unaccelerated) meson/ninja build always creates its whole
+   build-directory skeleton up front, during `configurePhase`, before
+   any compiler runs — so a compile's own `-MF <relative-dir>/<file>.
+   d` output can always assume its parent directory exists. This
+   accelerator's staged tree, by contrast, only ever contained what
+   the discovery scan found as an INPUT — an output-only directory
+   nothing `-include`s (confirmed via `library-versions.cc`'s own
+   `-MF libnixutil.so.2.36.0.p/library-versions.cc.o.d`) was never
+   created, so the compile failed writing the `.d` file. Fixed by
+   pre-creating every non-flag argv element's own dirname (at the
+   correct nesting depth) generically, covering `-MF`/`-MT`/`-o`-style
+   relative outputs without needing to special-case dependency-file
+   generation specifically.
+
+With all five fixed, all 76 translation units now compile and LINK
+(`[76/76] Linking target libnixutil.so.2.36.0`) — the first time this
+accelerator has built a real, substantial multi-file component all
+the way to a link step. The link itself currently fails with
+`undefined reference to 'pow'` under LTO (`-flto=auto`, meson's
+`release` buildtype default) — confirmed via direct A/B testing NOT
+to be caused by any of the five fixes above: both a unity-build and a
+non-unity, fully UNACCELERATED build of the identical component link
+successfully. The gap is specific to LTO combined with each `.o`
+being compiled and registered as a SEPARATE, isolated CA derivation
+rather than one shared ninja invocation (GCC's LTO partitioning
+across the 76 separately-compiled objects resolves `std::pow` calls
+in `util.cc`/`linux/cgroup.cc` differently than when ninja compiles
+and links them all within one build tree) — open as follow-on work,
+see below.
+
 ## What's still follow-on work
 
+- The `nix-util` LTO/`pow` linking gap above: still unresolved.
+  Candidate next steps: try disabling LTO for real this time (`meson`
+  reads `-Db_lto=...` last-wins, and `packaging/components.nix`'s own
+  `preConfigure` unconditionally re-appends `-Db_lto=true` for
+  `release`/`minsize` build types AFTER any caller-supplied override,
+  so a plain `mesonFlags` addition doesn't actually take effect — an
+  `overrideAttrs` on `preConfigure` itself, or a `buildType` override,
+  would be needed to genuinely test LTO-off); or investigate whether
+  explicitly linking `-lm` in the final link unit's own record
+  resolves it, without waiting to fully explain the GCC LTO
+  partitioning difference.
 - No new eager-mode-specific Nix-level regression fixture exists yet
   for `granularity = "module"` (example 06's compiled variant is the
   only current coverage) — a dedicated `dyndrv-shim`-crate-level

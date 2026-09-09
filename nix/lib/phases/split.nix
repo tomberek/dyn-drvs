@@ -209,6 +209,22 @@ let
       # works completely normally -- phase 1 only ever produces the ONE
       # `.drv` file `shim.collectStubs` submits.
       outputs = [ "out" ];
+      # `separateDebugInfo = false`: nixpkgs' own stdenv machinery
+      # injects an EXTRA "debug" output whenever `separateDebugInfo =
+      # true` is set, INDEPENDENTLY of the plain `outputs` attrset
+      # above -- confirmed by direct reproduction against NixOS/nix's
+      # own `nix-util` component (`separateDebugInfo = true`,
+      # `packaging/components.nix`'s own `mesonBuildLayer`): overriding
+      # `outputs = [ "out" ];` alone still left `outputs == [ "out"
+      # "debug" ]` on the actual derivation, hitting the exact same
+      # ".drv only if single output" error this override exists to
+      # avoid. Forcing it off here is safe -- phase 1 never produces a
+      # meaningful standalone debug-info output anyway (it's not `$out`
+      # in the conventional sense, see `dyndrvPlaceholderOut` above);
+      # any real package that wants separate debug info still gets it
+      # normally in PHASE 2 below, which inherits the caller's own
+      # unmodified `separateDebugInfo` setting.
+      separateDebugInfo = false;
       __contentAddressed = true;
       outputHashMode = "text";
       outputHashAlgo = "sha256";

@@ -15,6 +15,22 @@ pub struct Record {
     pub srcs: Vec<String>,
     #[serde(rename = "setupCmd", default, skip_serializing_if = "Option::is_none")]
     pub setup_cmd: Option<String>,
+    /// The nested-position path (e.g. `".dyndrv-cwd/.dyndrv-cwd/"`,
+    /// see `wrapCommand.nix`'s own header comment on
+    /// `DYNDRV_TREE_UPDEPTH`/`dyndrvUpDirName`) this record's own tool
+    /// invocation must run from -- needed whenever the invocation's own
+    /// paths referenced its source via one or more leading `../`
+    /// (meson's out-of-source-tree convention, confirmed necessary by
+    /// direct reproduction against NixOS/nix's own `nix-util`
+    /// component). Kept as its own field, NOT baked into `setup_cmd` as
+    /// a bare `cd` -- see `render.rs::render_record_line`'s own comment
+    /// for why a plain `cd` would leak into a LATER chained/merged
+    /// record's own `setup_cmd` otherwise. `None` for the common case
+    /// (every OTHER example/fixture this accelerator has been run
+    /// against so far, which never needed the tree's nested "cwd"
+    /// chain at all).
+    #[serde(rename = "chdir", default, skip_serializing_if = "Option::is_none")]
+    pub chdir: Option<String>,
     #[serde(rename = "chainedFrom", default, skip_serializing_if = "Option::is_none")]
     pub chained_from: Option<String>,
     /// Names an EARLIER dependency (an args-equivalent reference,

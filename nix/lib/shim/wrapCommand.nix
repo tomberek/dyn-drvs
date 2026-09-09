@@ -176,6 +176,29 @@
 #   `discover_tree`/`cc_to_node`, invoked via `wrapper::run_discover_tree`
 #   for `cc` specifically) -- so passing both is harmless, just redundant.
 #
+# `DYNDRV_BYPASS` (an ENV VAR the CALLER sets around a build step, not a
+#   Nix-level parameter of this function): checked FIRST, before any
+#   other logic, in every one of `wrapperScript`'s three variants -- if
+#   set (to anything non-empty), `exec`s straight to `realCommand` with
+#   the original argv, skipping deferral/decision logic entirely.
+#   Mirrors nixgg's own identical `NIXGG_BYPASS` mechanism exactly (same
+#   name convention, same "checked first, unconditional passthrough"
+#   semantics). This is DIFFERENT from `toNode` returning `null` (a
+#   PASSTHROUGH decision made per-invocation, by argv-shape heuristics
+#   like `is_conftest`'s `conftest*`-basename check): `DYNDRV_BYPASS` is
+#   a blanket, caller-controlled override for an ENTIRE build step whose
+#   own invocations can't be reliably distinguished by argv shape alone
+#   -- the motivating case is meson/cmake's own configure-time compiler
+#   probes (`meson setup`'s sanity check, every `compiler.compiles()`/
+#   `.has_function()` check), named `testfile.<ext>`/`sanitycheck{c,
+#   cpp,...}.*` by meson -- NOT `conftest*` -- so `is_conftest` never
+#   catches them, and deferring them breaks meson's own synchronous
+#   pass/fail configure logic outright (it needs the real exit code/
+#   output immediately, not a batch-pending stub). A caller (e.g.
+#   `accelerate.mkAcceleratedStdenv`'s own callers, via `preConfigure`/
+#   `postConfigure`) sets `DYNDRV_BYPASS=1` around `meson setup`/`cmake`
+#   and unsets it before the real `ninja`/`make` build step runs.
+#
 {
   command,
   realCommand,
@@ -299,6 +322,9 @@ in
       ''
         #!/bin/sh
         set -eu
+        if [ -n "''${DYNDRV_BYPASS:-}" ]; then
+          exec ${realCommand} "$@"
+        fi
         ${lib.concatStringsSep "\n" (
           lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}") compiledEnv
         )}
@@ -309,6 +335,9 @@ in
       ''
         #!/bin/sh
         set -eu
+        if [ -n "''${DYNDRV_BYPASS:-}" ]; then
+          exec ${realCommand} "$@"
+        fi
 
         export PATH="${nixPackage}/bin:$PATH"
         export NIX_CONFIG='extra-experimental-features = nix-command ca-derivations dynamic-derivations'
@@ -425,6 +454,9 @@ in
       ''
         #!/bin/sh
         set -eu
+        if [ -n "''${DYNDRV_BYPASS:-}" ]; then
+          exec ${realCommand} "$@"
+        fi
 
         export PATH="${nixPackage}/bin:$PATH"
         export NIX_CONFIG='extra-experimental-features = nix-command ca-derivations dynamic-derivations'
@@ -576,17 +608,157 @@ in
         # PARENT so concurrent invocations still get distinct filesystem
         # paths, but the directory `nix store add` actually hashes always
         # has the same name).
+        # A real build routinely compiles from a directory ONE OR MORE
+        # LEVELS BELOW its own source root (meson's own convention,
+        # confirmed necessary by direct reproduction against NixOS/nix's
+        # own `nix-util` component: EVERY compile there runs `cc ... -c
+        # ../hash.cc ...`, `../` and all) -- a naive `$treeDir/$p` join
+        # for such a path resolves OUTSIDE `$treeDir` entirely
+        # (`$treeDir/../hash.cc` is `$treeParent/hash.cc`), so it never
+        # reaches `nix store add`'s input and the eventual real compile
+        # fails with "No such file or directory" -- confirmed this is
+        # NOT a one-off: every single one of nix-util's ~90 translation
+        # units hit this identically, since meson's out-of-source-tree
+        # convention is uniform across the whole component.
+        #
+        # Fixed by giving the staged tree an EXTRA, fixed-name nested
+        # "cwd" chain (`dyndrvUpDirName`, repeated) representing the
+        # invocation's own real working directory, `dyndrvUpDepth`
+        # levels below the tree's root -- deep enough that even the
+        # LARGEST `../` prefix among this invocation's own paths still
+        # lands inside the tree. A path with `k` leading `../` segments
+        # (`k <= dyndrvUpDepth`) is staged `(dyndrvUpDepth - k)` "cwd"
+        # levels down (i.e. `k` levels ABOVE the deepest nesting),
+        # exactly matching where it will resolve to once the eventual
+        # builder `cd`s into that same nested chain before running the
+        # real command -- a path with NO `../` prefix (an ordinary
+        # `-I<relative>`/positional source under the invocation's own
+        # cwd) stays at the full nesting depth. `DYNDRV_TREE_UPDEPTH`
+        # (exported below) tells `toNode`/`toNodeBash` how many
+        # `dyndrvUpDirName` levels the eventual builder needs to `cd`
+        # into -- baked into `record.chdir`, read by `collectStubs.nix`'s
+        # `dyndrv_render_member` (and its Rust `render_record_line`
+        # equivalent) at RENDER time, since that's the only point a
+        # relative source path is actually resolved for real (this
+        # wrapper script's own job ends at registration).
+        dyndrvUpDirName=".dyndrv-cwd"
         treeParent=$(mktemp -d)
         treeDir="$treeParent/dyndrv-tree"
         ${pkgs.coreutils}/bin/mkdir -p "$treeDir"
+        dyndrvUpDepth=0
+        while IFS= read -r p; do
+          [ -z "$p" ] && continue
+          case "$p" in
+            /*) continue ;; # absolute paths (e.g. system headers under /nix/store) are real store inputs already, not staged into the tree
+          esac
+          dyndrvK=0
+          dyndrvRest="$p"
+          while :; do
+            case "$dyndrvRest" in
+              ../*) dyndrvK=$((dyndrvK + 1)); dyndrvRest="''${dyndrvRest#../}" ;;
+              *) break ;;
+            esac
+          done
+          [ "$dyndrvK" -gt "$dyndrvUpDepth" ] && dyndrvUpDepth="$dyndrvK"
+        done <<DYNDRV_PATHS
+        $allPaths
+        DYNDRV_PATHS
+        # The eventual builder unconditionally `cd`s `dyndrvUpDepth`
+        # levels into `dyndrvUpDirName/dyndrvUpDirName/...` BEFORE
+        # running the real command (see `mkAcceleratedStdenv.nix`'s
+        # own `dyndrv_chdir` -- this is the SAME depth), regardless of
+        # whether any INDIVIDUAL file this invocation stages happens
+        # to land there -- confirmed necessary by direct reproduction
+        # against NixOS/nix's own `nix-util` component: a compile
+        # whose OWN source has NO `../` prefix at all (e.g. `-c
+        # checked-arithmetic.cc`, staged at nesting level 0) but whose
+        # sibling `-I../include` flags still need `dyndrvUpDepth = 1`
+        # (from OTHER paths this SAME invocation references) never
+        # triggers the per-file `mkdir -p "$(dirname "$dyndrvDest")"`
+        # loop below for the `.dyndrv-cwd/` directory ITSELF (nothing
+        # is ever staged strictly AT that nesting level for this
+        # invocation) -- so without this, `cd .dyndrv-cwd/` failed
+        # outright ("No such file or directory") the moment a
+        # compile's OWN source happened to need zero nesting while its
+        # sibling headers needed some.
+        dyndrvI=0
+        dyndrvMkdirPath="$treeDir"
+        while [ "$dyndrvI" -lt "$dyndrvUpDepth" ]; do
+          dyndrvMkdirPath="$dyndrvMkdirPath/$dyndrvUpDirName"
+          dyndrvI=$((dyndrvI + 1))
+        done
+        ${pkgs.coreutils}/bin/mkdir -p "$dyndrvMkdirPath"
+        # A real (unaccelerated) meson/ninja build always creates its
+        # WHOLE build-directory skeleton (every `<target>.p/` output
+        # subdirectory) up front, during `configurePhase`, before any
+        # compiler ever runs -- so a compiler's own `-MF <relative-
+        # dir>/<file>.d` dependency-file output can always assume its
+        # own parent directory already exists. This accelerator's
+        # staged tree, by contrast, only ever contains what
+        # `discoverTree`'s own dependency SCAN found (real SOURCE/
+        # HEADER *inputs*, never an output-only directory nothing
+        # `-include`s) -- confirmed necessary by direct reproduction
+        # against NixOS/nix's own `nix-util` component:
+        # `library-versions.cc`'s own `-MF libnixutil.so.2.36.0.p/
+        # library-versions.cc.o.d` failed outright ("No such file or
+        # directory") the moment its compile actually tried to WRITE
+        # that file, since nothing else in this invocation's own argv
+        # ever referenced `libnixutil.so.2.36.0.p/` as an INPUT (its
+        # sibling `-Ilibnixutil.so.2.36.0.p` flag names the identical
+        # directory, but as a search path, invisible to the input-only
+        # scan above). Pre-creating every `-MF`/`-MT`/`-o` value's own
+        # dirname here -- at the SAME nesting depth this invocation's
+        # own `dyndrvUpDepth` computed above -- covers this generically,
+        # without needing to special-case dependency-file generation
+        # specifically (any OTHER compiler flag that writes a relative-
+        # path output nothing else references would hit the identical
+        # gap).
+        for a in "$@"; do
+          case "$a" in
+            /*) continue ;;
+          esac
+          dyndrvOutK=0
+          dyndrvOutRest="$a"
+          while :; do
+            case "$dyndrvOutRest" in
+              ../*) dyndrvOutK=$((dyndrvOutK + 1)); dyndrvOutRest="''${dyndrvOutRest#../}" ;;
+              *) break ;;
+            esac
+          done
+          dyndrvOutNestLevels=$((dyndrvUpDepth - dyndrvOutK))
+          [ "$dyndrvOutNestLevels" -lt 0 ] && continue
+          dyndrvOutNestPrefix=""
+          dyndrvOutI=0
+          while [ "$dyndrvOutI" -lt "$dyndrvOutNestLevels" ]; do
+            dyndrvOutNestPrefix="$dyndrvOutNestPrefix$dyndrvUpDirName/"
+            dyndrvOutI=$((dyndrvOutI + 1))
+          done
+          ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$treeDir/$dyndrvOutNestPrefix$dyndrvOutRest")"
+        done
         while IFS= read -r p; do
           [ -z "$p" ] && continue
           case "$p" in
             /*) continue ;; # absolute paths (e.g. system headers under /nix/store) are real store inputs already, not staged into the tree
           esac
           if [ -f "$p" ]; then
-            ${pkgs.coreutils}/bin/mkdir -p "$treeDir/$(${pkgs.coreutils}/bin/dirname "$p")"
-            ${pkgs.coreutils}/bin/cp "$p" "$treeDir/$p"
+            dyndrvK=0
+            dyndrvRest="$p"
+            while :; do
+              case "$dyndrvRest" in
+                ../*) dyndrvK=$((dyndrvK + 1)); dyndrvRest="''${dyndrvRest#../}" ;;
+                *) break ;;
+              esac
+            done
+            dyndrvNestLevels=$((dyndrvUpDepth - dyndrvK))
+            dyndrvNestPrefix=""
+            dyndrvI=0
+            while [ "$dyndrvI" -lt "$dyndrvNestLevels" ]; do
+              dyndrvNestPrefix="$dyndrvNestPrefix$dyndrvUpDirName/"
+              dyndrvI=$((dyndrvI + 1))
+            done
+            dyndrvDest="$treeDir/$dyndrvNestPrefix$dyndrvRest"
+            ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dyndrvDest")"
+            ${pkgs.coreutils}/bin/cp "$p" "$dyndrvDest"
           fi
         done <<DYNDRV_PATHS
         $allPaths
@@ -595,6 +767,8 @@ in
         treePath=$(nix store add "$treeDir" 2>/dev/null)
         rm -rf "$treeParent"
         export DYNDRV_TREE_BASENAME=$(${pkgs.coreutils}/bin/basename "$treePath")
+        export DYNDRV_TREE_UPDEPTH="$dyndrvUpDepth"
+        export DYNDRV_TREE_UPDIRNAME="$dyndrvUpDirName"
 
         nodeExprFile=$(mktemp)
         cat > "$nodeExprFile" <<'DYNDRV_TONODE_EXPR'
@@ -604,7 +778,7 @@ in
         argvFile=$(mktemp)
         printf '%s' "$argvJson" > "$argvFile"
 
-        node=$(ARGV_PATH="$argvFile" DYNDRV_TREE_BASENAME="$DYNDRV_TREE_BASENAME" nix-instantiate --eval --strict --json --expr \
+        node=$(ARGV_PATH="$argvFile" DYNDRV_TREE_BASENAME="$DYNDRV_TREE_BASENAME" DYNDRV_TREE_UPDEPTH="$DYNDRV_TREE_UPDEPTH" DYNDRV_TREE_UPDIRNAME="$DYNDRV_TREE_UPDIRNAME" nix-instantiate --eval --strict --json --expr \
           "let argv = builtins.fromJSON (builtins.readFile (builtins.getEnv \"ARGV_PATH\")); f = import $nodeExprFile; in f argv" 2>/dev/null)
         rm -f "$nodeExprFile" "$argvFile"
 

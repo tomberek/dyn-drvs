@@ -70,6 +70,19 @@ where
     }
 
     let mut cmd_line = String::new();
+    // `record.chdir` (see `record.rs`'s own doc comment on why this is
+    // a SEPARATE field, not baked into `setup_cmd` as a bare `cd`):
+    // wraps ONLY this record's own `tool $args` invocation in a
+    // `( cd ... && ... )` subshell, so a merged unit's LATER member's
+    // own `setup_cmd` (its `cp -r`, run in the shared, unmodified build
+    // root) is never affected by an EARLIER member's nested cwd -- the
+    // subshell's own cwd change is invisible outside it. Port of
+    // `collectStubs.nix`'s own identical `dyndrv_render_member` fix.
+    if let Some(chdir) = &record.chdir {
+        cmd_line.push_str("( cd ");
+        cmd_line.push_str(&shell_quote(chdir));
+        cmd_line.push_str(" && ");
+    }
     cmd_line.push_str(&record.tool);
     for a in &record.args {
         cmd_line.push(' ');
@@ -86,6 +99,9 @@ where
         } else {
             cmd_line.push_str(&shell_quote(a));
         }
+    }
+    if record.chdir.is_some() {
+        cmd_line.push_str(" )");
     }
     cmd_line.push_str("; ");
 
@@ -187,6 +203,27 @@ where
             member_ref_token(&output_name_of_stub[p])
         };
         let (setup, cmd, srcs) = render_member(stub, &own_out_var, |a| {
+            // `a == p`: this argv element is a REFERENCE TO THIS SAME
+            // MEMBER'S OWN OUTPUT PATH (e.g. `-MQ <objpath>` alongside
+            // `-o <objpath>`, both naming the identical real path --
+            // ninja/meson generate this pair directly, no `"$out"`
+            // sentinel involved) -- confirmed by direct reproduction
+            // against a real meson build (NixOS/nix's own `nix-util`
+            // component, via the bash `collectStubs.nix` equivalent of
+            // this exact function): a compile's own output path is
+            // ITSELF a discovered stub the moment its `.o` gets
+            // written, so without this check the generic `unit_of`
+            // lookup below matches it and returns the MERGED-unit
+            // member-reference form even for a SOLO unit, where
+            // `$out` is never bound under that sanitized name at all.
+            // Checked BEFORE the generic same-unit lookup, which would
+            // otherwise match this exact case first (correctly, by
+            // coincidence, for a merged unit -- `own_out_var` already
+            // equals what that lookup would return there -- but wrong
+            // for a solo unit, where they differ).
+            if a == p {
+                return Some(own_out_var.clone());
+            }
             if let Some(du) = unit_of.get(a) {
                 if du == this_unit {
                     return Some(member_ref_token(&output_name_of_stub[a]));
@@ -352,6 +389,7 @@ mod cross_mode_tests {
             args: vec!["-c".to_string(), "main.c".to_string(), "-o".to_string(), "$out".to_string()],
             srcs: vec!["xxx-gcc".to_string()],
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             seed_from: None,
         };
@@ -377,6 +415,7 @@ mod cross_mode_tests {
             ],
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             seed_from: None,
         };
@@ -402,6 +441,7 @@ mod cross_mode_tests {
             args: vec!["$out".to_string()],
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             seed_from: Some(SeedFrom {
                 from: "archive.a.drv".to_string(),
@@ -433,6 +473,7 @@ mod cross_mode_tests {
             args: vec!["rcs".to_string(), "$out".to_string(), "main.o".to_string()],
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             seed_from: None,
         };
@@ -442,6 +483,7 @@ mod cross_mode_tests {
             args: vec!["$out".to_string()],
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             // A CHAINED ranlib's own `seed_from.from` is the stub's OWN
             // self-referential relative-path text (see `render_member`'s

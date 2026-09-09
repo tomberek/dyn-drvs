@@ -336,6 +336,46 @@ let
         done | sort -u | ${pkgs.jq}/bin/jq -R -s 'split("\n") | map(select(. != ""))'
       )
 
+      # `dyndrv_chdir`: when this invocation's own paths needed the
+      # staged tree's extra nested "cwd" chain (see `wrapCommand.nix`'s
+      # own header comment on `DYNDRV_TREE_UPDEPTH`/`dyndrvUpDirName` --
+      # meson's convention of compiling from a directory below its
+      # source root, e.g. `-c ../hash.cc`, needs this), the eventual
+      # registered derivation's builder must run THIS record's own tool
+      # invocation from that SAME nested position -- relative path text
+      # in `args` (e.g. `../hash.cc`) is left completely unchanged, only
+      # the process's OWN cwd at invocation time shifts to match where
+      # the tree was staged.
+      #
+      # This is carried as its own record field (`chdir`), NOT baked
+      # directly into `setupCmd` as a plain `cd` -- confirmed necessary
+      # by direct reasoning about a MERGED unit (`granularity =
+      # "module"`, several members' own setup+cmd fragments
+      # concatenated into ONE shared shell script/cwd): a bare `cd`
+      # would persist across the `&&`-chain into the NEXT member's own
+      # `setupCmd` (that member's `cp -r <itsOwnTree>/. .` would then
+      # wrongly land inside the PREVIOUS member's nested subdirectory
+      # instead of the shared build root every member's tree was
+      # actually staged relative to). `collectStubs.nix`'s
+      # `dyndrv_render_member` (and its Rust `render_record_line`
+      # equivalent) wraps ONLY this one record's own `tool $args`
+      # invocation in a `( cd $chdir && ... )` subshell, so the cwd
+      # change is scoped to that one invocation and never leaks into a
+      # sibling member's own setup. Empty/absent when this invocation
+      # staged nothing beyond its own cwd (`DYNDRV_TREE_UPDEPTH` = 0,
+      # the common case for every OTHER example/fixture this
+      # accelerator has been run against so far) -- `null` there, not
+      # an empty string, so the renderer's own presence check
+      # (`.chdir // empty`) skips the subshell wrapper entirely rather
+      # than emitting a no-op `( cd  && ... )`.
+      dyndrv_updepth="''${DYNDRV_TREE_UPDEPTH:-0}"
+      dyndrv_chdir=""
+      dyndrv_i=0
+      while [ "$dyndrv_i" -lt "$dyndrv_updepth" ]; do
+        dyndrv_chdir="$dyndrv_chdir''${DYNDRV_TREE_UPDIRNAME:-.dyndrv-cwd}/"
+        dyndrv_i=$((dyndrv_i + 1))
+      done
+
       record=$(${pkgs.jq}/bin/jq -nc \
         --argjson key "$batch_key" \
         --arg tool "${realCc}" \
@@ -346,13 +386,14 @@ let
         --argjson extraSrcs "$extra_store_paths_json" \
         --arg setupCmdPrefix "${pkgs.coreutils}/bin/cp -r ${builtins.storeDir}/" \
         --arg setupCmdSuffix "/. . && ${pkgs.coreutils}/bin/chmod -R u+w . &&" \
+        --arg chdir "$dyndrv_chdir" \
         '{
           key: $key,
           tool: $tool,
           args: $args,
           srcs: ([$coreutils, $stdenvCc, $treeBasename] + $extraSrcs),
           setupCmd: ($setupCmdPrefix + $treeBasename + $setupCmdSuffix)
-        }')
+        } + (if $chdir != "" then {chdir: $chdir} else {} end))')
 
       if [ "$out_idx" != -1 ]; then
         ${pkgs.jq}/bin/jq -nc --argjson defer "{\"record\":$(printf '%s' "$record" | ${pkgs.jq}/bin/jq -R .)}" \
@@ -568,6 +609,120 @@ let
       let
         outputFile = if outIdx != (-1) then builtins.elemAt argv (outIdx + 1) else implicitOutputFile;
         treeBasename = builtins.getEnv "DYNDRV_TREE_BASENAME";
+        # See `wrapCommand.nix`'s own header comment on
+        # `DYNDRV_TREE_UPDEPTH`/`dyndrvUpDirName` -- the nested-position
+        # string for THIS invocation, computed here (not in
+        # `ccToNodeBash`, which is DEAD CODE for `cc`/`c++`: both
+        # `ccShim`/`cxxShim` below set `discoverTree`, and
+        # `wrapCommand.nix`'s `discoverTree`-active wrapperScript
+        # variant ONLY ever calls `toNode` via a direct
+        # `nix-instantiate` invocation, never `toNodeBash` at all --
+        # confirmed by direct reproduction: the actual built `cc`
+        # wrapper script contains no `dyndrv_to_node`/
+        # `dyndrv_call_to_node`, only the `nix-instantiate` call). `""`
+        # (absent from `record`, since `chdir` is entirely omitted
+        # below when empty) when this invocation staged nothing beyond
+        # its own cwd.
+        treeUpDepth = let v = builtins.getEnv "DYNDRV_TREE_UPDEPTH"; in if v == "" then 0 else builtins.fromJSON v;
+        treeUpDirName =
+          let v = builtins.getEnv "DYNDRV_TREE_UPDIRNAME"; in if v == "" then ".dyndrv-cwd" else v;
+        chdir = builtins.concatStringsSep "" (builtins.genList (_: "''${treeUpDirName}/") treeUpDepth);
+
+        # nixpkgs' own cc-wrapper/bintools-wrapper setup hooks inject
+        # extra compiler flags via ENV VARS (`NIX_CFLAGS_COMPILE`,
+        # `NIX_LDFLAGS`, ...), populated from `buildInputs`/
+        # `propagatedBuildInputs` (e.g. boost's own `-isystem` for its
+        # headers) at the point THOSE packages' setup hooks ran, long
+        # before this compile's own argv was ever constructed --
+        # confirmed necessary by direct reproduction against NixOS/
+        # nix's own `nix-util` component: `#include <boost/format.hpp>`
+        # failed with "No such file or directory" even though boost IS
+        # a real `propagatedBuildInput`, because the registered
+        # derivation's own `env` (see `setupCmd` below) never carried
+        # `NIX_CFLAGS_COMPILE` at all -- only `{out: ...}` was ever
+        # exported inside the eventual one-shot builder, so this
+        # ambient, setup-hook-populated var was simply unset there.
+        # Read here via `builtins.getEnv` (the SAME mechanism
+        # `treeBasename`/`treeUpDepth` above already use) for each
+        # allowlisted name -- `nix-instantiate`'s own subprocess
+        # inherits the calling wrapper script's FULL environment
+        # (bash's `VAR=val cmd` form only PREPENDS `ARGV_PATH`/
+        # `DYNDRV_TREE_BASENAME`/etc., never clears the rest), so every
+        # one of these vars is genuinely present to read, exactly as
+        # ambient as they'd be for the compile if it ran unaccelerated.
+        wrapperEnvNames = [
+          "NIX_CFLAGS_COMPILE_BEFORE"
+          "NIX_CFLAGS_COMPILE"
+          "NIX_CFLAGS_LINK"
+          "NIX_LDFLAGS_BEFORE"
+          "NIX_LDFLAGS"
+          "NIX_CXXSTDLIB_COMPILE"
+          "NIX_CXXSTDLIB_LINK"
+          "NIX_DYNAMIC_LINKER"
+          "NIX_HARDENING_ENABLE"
+          "NIX_ENFORCE_NO_NATIVE"
+          "NIX_ENFORCE_PURITY"
+        ];
+        # `stdenv.cc.suffixSalt` (e.g. `"x86_64_unknown_linux_gnu"`):
+        # the TARGET-SUFFIXED form of each name above (confirmed via
+        # direct eval this attribute exists and matches the suffix
+        # cc-wrapper's own setup hook actually uses) -- both the bare
+        # and salted form are captured, matching the bash oracle's own
+        # allowlist regex exactly (roughly "_<anything>" as an optional
+        # suffix), here narrowed to the ONE concrete salt this stdenv
+        # actually uses, since `builtins.getEnv` needs an exact name,
+        # not a pattern. This OUTER Nix file's own value for the salt
+        # is spliced in directly below (escaped so the INNER generated
+        # program's own `n` stays a runtime concatenation, not a
+        # second `builtins.getEnv` for the salt itself).
+        #
+        # `wrapperEnvPairs`: `[ { name = ...; value = ...; } ]` for
+        # every actually-SET var among `wrapperEnvNames`'s bare+salted
+        # forms, PLUS the `NIX_CC_WRAPPER_TARGET_HOST`/`NIX_BINTOOLS_
+        # WRAPPER_TARGET_HOST`-style role markers (SALTED-ONLY -- no
+        # bare form exists at all): plain `=1` markers cc-wrapper's/
+        # bintools-wrapper's own setup hooks set per BUILD/HOST/TARGET
+        # role, read by `add-flags.sh`'s own `accumulateRoles`/
+        # `mangleVarList` (ambient in every real, unaccelerated build)
+        # to decide WHICH bare `NIX_CFLAGS_COMPILE`-style var actually
+        # gets copied into the salted variant `cc` itself reads --
+        # confirmed necessary by direct reproduction: exporting
+        # `NIX_CFLAGS_COMPILE` (bare) alone, WITHOUT this marker, left
+        # `add-flags.sh`'s `role_suffixes` array empty, so the salted
+        # var it writes to (the ONLY one `cc`'s own script ever reads)
+        # never got boost's `-isystem` flag copied into it at all.
+        # Collected as one list of pairs (not built directly into the
+        # export string) so `extraStorePaths` below can ALSO scan
+        # every value for a real store path it references (e.g.
+        # `NIX_CFLAGS_COMPILE`'s own `-isystem /nix/store/...-boost-
+        # ...-dev/include`) -- confirmed necessary by direct
+        # reproduction against NixOS/nix's own `nix-util` component:
+        # exporting the flag TEXT correctly still failed with
+        # "boost/format.hpp: No such file or directory", because
+        # boost's own store path was never declared as a `srcs` input
+        # at all (only argv itself was ever scanned for store-path
+        # references before this fix) -- boost's `-isystem` flag lives
+        # ENTIRELY inside an env var's value, invisible to that argv-
+        # only scan, so the path was simply absent from the sandbox's
+        # own mounted closure even though the flag text pointing at it
+        # was correctly exported.
+        wrapperEnvPairs =
+          builtins.concatMap (
+            n:
+            builtins.concatMap (
+              name:
+              let v = builtins.getEnv name; in
+              if v == "" then [ ] else [ { inherit name; value = v; } ]
+            ) [ n "''${n}_${stdenv.cc.suffixSalt or "__dyndrv_no_salt__"}" ]
+          ) wrapperEnvNames
+          ++ builtins.concatMap (
+            n:
+            let salted = "''${n}_${stdenv.cc.suffixSalt or "__dyndrv_no_salt__"}"; v = builtins.getEnv salted; in
+            if v == "" then [ ] else [ { name = salted; value = v; } ]
+          ) [ "NIX_CC_WRAPPER_TARGET_BUILD" "NIX_CC_WRAPPER_TARGET_HOST" "NIX_CC_WRAPPER_TARGET_TARGET" "NIX_BINTOOLS_WRAPPER_TARGET_BUILD" "NIX_BINTOOLS_WRAPPER_TARGET_HOST" "NIX_BINTOOLS_WRAPPER_TARGET_TARGET" ];
+        wrapperEnvExports = builtins.concatStringsSep "" (
+          map (p: " export ''${p.name}=''${shellQuote p.value};") wrapperEnvPairs
+        );
 
         # Single-quote each argv element for safe embedding in a
         # /bin/sh -c command line -- see `collectStubs.nix`'s own
@@ -597,22 +752,59 @@ let
           else
             argv ++ [ "-o" "$out" ];
 
-        # Any argv element can reference a store path NOT already covered
-        # by `stdenv.cc`/`coreutils`/the staged tree -- e.g. `-I/nix/store/
-        # ...-libpng-.../include`, glued directly onto the flag with no
-        # space (confirmed necessary by direct reproduction against a real
-        # freetype build). `builtins.match` extracts the `<hash>-<name>`
-        # store basename from anywhere inside an argv element's text,
-        # deduplicated via a plain attrset-as-set trick.
-        extraStorePathsRaw = builtins.filter (x: x != null) (
-          map (
-            a:
-            let
-              m = builtins.match ".*(${builtins.storeDir}/([^/\"']+)).*" a;
-            in
-            if m == null then null else builtins.elemAt m 1
-          ) argv
-        );
+        # Any argv element (or wrapper-env-var VALUE, e.g. `NIX_CFLAGS_
+        # COMPILE`'s own `-isystem /nix/store/...-boost-...-dev/include`
+        # -- see `wrapperEnvPairs`'s own header comment on why this
+        # scan can't be argv-only) can reference a store path NOT
+        # already covered by `stdenv.cc`/`coreutils`/the staged tree --
+        # e.g. `-I/nix/store/...-libpng-.../include`, glued directly
+        # onto the flag with no space (confirmed necessary by direct
+        # reproduction against a real freetype build).
+        #
+        # `findAllStorePaths`: `builtins.match` only ever returns the
+        # FIRST match on a `.*(...).*`-style pattern, insufficient for
+        # a string like `NIX_CFLAGS_COMPILE`'s value that concatenates
+        # MANY `-isystem <path>/include` flags together (confirmed
+        # necessary by direct reproduction: a single-`match` scan found
+        # only the LAST store path in such a string, silently dropping
+        # every earlier one). `builtins.split` (unlike `match`) returns
+        # every non-overlapping match across the WHOLE string in one
+        # pass -- odd-indexed elements are each match's own capture-
+        # group list (even-indexed elements are the literal text
+        # BETWEEN matches, discarded here).
+        #
+        # Filters out any match whose basename ends in `.drv` --
+        # confirmed necessary by direct reproduction against NixOS/
+        # nix's own `nix-util` component: `NIX_LDFLAGS`'s own `-rpath
+        # <placeholder>/lib` value contains THIS DERIVATION'S OWN
+        # self-referential CA output placeholder (e.g. `/nix/store/
+        # <hash>-nix-util-2.36.0pre.drv/lib`, `stdenv`'s ordinary `-
+        # rpath $out/lib` linker flag with `$out` already substituted
+        # to the not-yet-built placeholder text by the time this
+        # invocation's env is constructed) -- scanning it unconditionally
+        # added that self-reference as a required `srcs` entry on
+        # EVERY compile's own registered derivation, and since that
+        # path can never become valid (it's this package's own not-
+        # yet-realized output, referencing itself), the eventual final
+        # `nix store submit-output` failed with "path ... is not
+        # valid" -- confirmed by direct reproduction that the exact
+        # failing path's hash prefix matched this exact placeholder.
+        # A REAL store input is never itself named `*.drv` (that
+        # naming convention is reserved for `.drv` FILES themselves,
+        # never an ordinary package's own output) -- see `phases/
+        # split.nix`'s own header comment on why `mkDynamicDerivation`'s
+        # outer wrapper is deliberately named this way -- so this
+        # filter can never accidentally exclude a genuinely-needed
+        # dependency.
+        findAllStorePaths = s:
+          builtins.filter (p: !(hasSuffix ".drv" p)) (
+            builtins.concatMap (
+              x: if builtins.isList x then [ (builtins.elemAt x 0) ] else [ ]
+            ) (builtins.split "${builtins.storeDir}/([^/\"' ]+)" s)
+          );
+        extraStorePathsRaw =
+          builtins.concatMap findAllStorePaths argv
+          ++ builtins.concatMap (p: findAllStorePaths p.value) wrapperEnvPairs;
         extraStorePaths = builtins.attrNames (
           builtins.listToAttrs (map (n: { name = n; value = null; }) extraStorePathsRaw)
         );
@@ -624,20 +816,23 @@ let
       in
       {
         defer = {
-          record = builtins.toJSON {
-            key = batchKey;
-            tool = "${realCc}";
-            args = argvForCc;
-            srcs = srcsList;
-            # `chmod -R u+w .` AFTER `cp -r`, not before: `cp -r`
-            # preserves the read-only Nix store source's permissions on
-            # the destination, so chmod'ing before is a no-op (the
-            # following `cp -r` overwrites it right back to read-only);
-            # needed both for members sharing a working directory AND
-            # for a real compile writing its own `.d` file back into the
-            # tree (`-MF`, ffmpeg's own dependency-file generation).
-            setupCmd = "${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${pkgs.coreutils}/bin/chmod -R u+w . &&";
-          };
+          record = builtins.toJSON (
+            {
+              key = batchKey;
+              tool = "${realCc}";
+              args = argvForCc;
+              srcs = srcsList;
+              # `chmod -R u+w .` AFTER `cp -r`, not before: `cp -r`
+              # preserves the read-only Nix store source's permissions on
+              # the destination, so chmod'ing before is a no-op (the
+              # following `cp -r` overwrites it right back to read-only);
+              # needed both for members sharing a working directory AND
+              # for a real compile writing its own `.d` file back into the
+              # tree (`-MF`, ffmpeg's own dependency-file generation).
+              setupCmd = "''${wrapperEnvExports}${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${pkgs.coreutils}/bin/chmod -R u+w . &&";
+            }
+            // (if chdir != "" then { inherit chdir; } else { })
+          );
         };
       }
       // (if outIdx != (-1) then { outputArg = outIdx + 1; } else { outputPath = implicitOutputFile; })

@@ -2,7 +2,7 @@ use anyhow::Context;
 use dyndrv_shim::cc::{cc_to_node, discover_tree};
 use dyndrv_shim::mode;
 use dyndrv_shim::tonode::{ar_to_node, ranlib_to_node};
-use dyndrv_shim::wrapper::{run_discover_tree, run_plain};
+use dyndrv_shim::wrapper::{exec_passthrough, run_discover_tree, run_plain};
 use std::collections::HashMap;
 
 /// Entrypoint for the `cc`/`ar`/`ranlib` shims, dispatched via
@@ -23,10 +23,21 @@ use std::collections::HashMap;
 ///   DYNDRV_BATCH_GROUPS   JSON `{relSourcePath: groupKey}` (cc only, optional)
 ///   DYNDRV_MODE           optional override: "sandbox" | "rpc" | "thunk"
 ///   DYNDRV_AUTOFORCE      "1" to realize immediately (Rpc/Thunk modes)
+///   DYNDRV_BYPASS         if set, exec straight to DYNDRV_REAL_COMMAND
+///                         with the original argv, before anything else
+///                         runs (no daemon connection attempted at all) --
+///                         see `wrapCommand.nix`'s own doc comment for
+///                         the full rationale (meson/cmake configure-time
+///                         compiler probes, which argv-shape heuristics
+///                         like `is_conftest` can't reliably catch).
 fn main() -> anyhow::Result<()> {
     let tool = std::env::var("DYNDRV_TOOL").context("DYNDRV_TOOL")?;
     let real_command = std::env::var("DYNDRV_REAL_COMMAND").context("DYNDRV_REAL_COMMAND")?;
     let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    if std::env::var("DYNDRV_BYPASS").is_ok_and(|v| !v.is_empty()) {
+        return exec_passthrough(&real_command, &argv);
+    }
 
     let client = mode::connect().context("connect")?;
     let mode = mode::detect();
@@ -63,13 +74,14 @@ fn main() -> anyhow::Result<()> {
                 &argv,
                 mode,
                 |argv| discover_tree(argv, &real_command),
-                |argv, tree_basename| {
+                |argv, tree_basename, tree_up_depth| {
                     cc_to_node(
                         argv,
                         &real_command,
                         &coreutils_basename,
                         &stdenv_cc_basename,
                         tree_basename,
+                        tree_up_depth,
                         &batch_groups,
                     )
                 },

@@ -383,17 +383,39 @@ in
     # version of this function required.
     dyndrv_render_member() {
       local p="$1" ownOutVar="$2" u="$3"
-      local setupCmd="" cmdLine="" srcs="" tool thisSetupCmd theseSrcs argsLine a rec
+      local setupCmd="" cmdLine="" srcs="" tool thisSetupCmd thisChdir theseSrcs argsLine a rec
       local -a chain
       dyndrv_record_chain chain "''${DYNDRV_STUB_RECORD[$1]}"
       for rec in "''${chain[@]}"; do
         {
           IFS= read -r tool
           IFS= read -r thisSetupCmd
+          IFS= read -r thisChdir
           IFS= read -r theseSrcs
           argsLine=""
           while IFS= read -r a; do
             if [ "$a" = '$out' ]; then
+              argsLine="$argsLine $ownOutVar"
+            elif [ "$a" = "$p" ]; then
+              # This argv element is a REFERENCE TO THIS SAME COMPILE'S
+              # OWN OUTPUT PATH (e.g. `-MQ <objpath>` alongside `-o
+              # <objpath>`, both naming the identical real path -- ninja/
+              # meson generate this pair directly, no `$out` sentinel
+              # substitution involved) -- confirmed by direct
+              # reproduction against a real meson build (NixOS/nix's own
+              # `nix-util` component): a compile's own output path is
+              # ITSELF a discovered stub the moment its `.o` gets
+              # written (that's how deferral works), so without this
+              # check the generic `DYNDRV_IS_STUB` branch below matched
+              # it and substituted the MERGED-unit member-reference form
+              # (`$<sanitized-name>`) instead of `$ownOutVar` -- wrong
+              # for a solo unit (`$out` is never bound under that
+              # sanitized name at all, an undefined-variable reference
+              # gcc then saw as a missing/empty `-MQ` argument, shifting
+              # every argv element after it and producing "cannot
+              # specify '-o' with '-c'... with multiple files"). Must be
+              # checked BEFORE the generic `DYNDRV_IS_STUB` branch, which
+              # would otherwise match this exact same case first.
               argsLine="$argsLine $ownOutVar"
             elif [ -n "''${DYNDRV_IS_STUB[$a]:-}" ]; then
               if [ "''${DYNDRV_UNIT_OF[$a]}" = "$u" ]; then
@@ -408,6 +430,7 @@ in
         } < <(${pkgs.jq}/bin/jq -r '
           (.tool),
           (.setupCmd // ""),
+          (.chdir // ""),
           ((.srcs // []) | join("")),
           (.args[]? | select(type == "string"))
         ' "$rec")
@@ -416,7 +439,19 @@ in
           srcs="$srcs''${theseSrcs//$'\x01'/$'\n'}
 "
         fi
-        cmdLine="$cmdLine$tool $argsLine; "
+        # `thisChdir` (see `mkAcceleratedStdenv.nix`'s own header
+        # comment on why this is a SEPARATE record field, not baked
+        # into `setupCmd` as a bare `cd`): wraps ONLY this one record's
+        # own `tool $argsLine` invocation in a `( cd ... && ... )`
+        # subshell, so a merged unit's LATER member's own `setupCmd`
+        # (its `cp -r`, run in the shared, unmodified build root) is
+        # never affected by an EARLIER member's nested cwd -- the
+        # subshell's own cwd change is invisible outside it.
+        if [ -n "$thisChdir" ]; then
+          cmdLine="$cmdLine( cd $(dyndrv_sq "$thisChdir") && $tool $argsLine ); "
+        else
+          cmdLine="$cmdLine$tool $argsLine; "
+        fi
       done
       printf '%s\n%s\n%s' "$setupCmd" "$cmdLine" "$srcs"
     }

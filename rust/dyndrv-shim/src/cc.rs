@@ -16,6 +16,52 @@ fn is_conftest(path: &str) -> bool {
     basename(path).starts_with("conftest")
 }
 
+/// Port of `ccToNodeBash`'s own `dyndrv_env_prefix` computation
+/// (`mkAcceleratedStdenv.nix`) -- see that file's own header comment
+/// for the full rationale (nixpkgs' cc-wrapper/bintools-wrapper setup
+/// hooks inject extra compiler flags, e.g. boost's own `-isystem`, via
+/// ENV VARS populated from `buildInputs`, not literal argv -- these
+/// vanish for a registered derivation whose `env` only ever has
+/// `{out: ...}` unless explicitly captured here and re-exported).
+/// This binary execs directly in place of `cc` (unlike the bash
+/// wrapper script, no separate process boundary), so it already
+/// inherits the SAME ambient environment a real, unaccelerated compile
+/// would see -- `std::env::vars()` reads it directly, no plumbing
+/// through `compiledEnv` needed. Same allowlist regex as the bash
+/// oracle, kept as an explicit name list here (matching Rust's own
+/// idiom elsewhere in this codebase -- no regex dependency) rather
+/// than a literal regex port.
+fn capture_wrapper_env() -> String {
+    const PREFIXES: &[&str] = &[
+        "NIX_CFLAGS_COMPILE_BEFORE",
+        "NIX_CFLAGS_COMPILE",
+        "NIX_CFLAGS_LINK",
+        "NIX_LDFLAGS_BEFORE",
+        "NIX_LDFLAGS",
+        "NIX_CXXSTDLIB_COMPILE",
+        "NIX_CXXSTDLIB_LINK",
+        "NIX_DYNAMIC_LINKER",
+        "NIX_HARDENING_ENABLE",
+        "NIX_ENFORCE_NO_NATIVE",
+        "NIX_ENFORCE_PURITY",
+    ];
+    let mut out = String::new();
+    for (name, value) in std::env::vars() {
+        // Matches a PREFIX exactly (the bare, non-target-suffixed
+        // form) OR that prefix followed by `_<salt>` (the target-
+        // suffixed form, e.g. `NIX_CFLAGS_COMPILE_x86_64_unknown_
+        // linux_gnu`) -- mirrors the bash oracle's own
+        // `(_[A-Za-z0-9_]+)?$` suffix.
+        let matches = PREFIXES.iter().any(|p| {
+            name == *p || name.strip_prefix(p).is_some_and(|rest| rest.starts_with('_'))
+        });
+        if matches {
+            out.push_str(&format!(" export {name}={};", crate::render::shell_quote(&value)));
+        }
+    }
+    out
+}
+
 /// Scans argv for any element that's already a real store path and
 /// returns their store basenames -- port of `ccToNodeBash`'s
 /// `extraStorePaths`. Shared with `ar_to_node`/`ranlib_to_node` (see
@@ -67,6 +113,13 @@ fn extra_store_paths(argv: &[String]) -> Vec<String> {
 /// mirrors `DYNDRV_TREE_BASENAME`, but passed as a plain argument here
 /// instead of an env var since this binary controls both sides of that
 /// boundary itself, no env var indirection needed).
+/// `tree_up_depth`: the nested "cwd" depth `wrapper::stage_tree` staged
+/// the tree at for THIS invocation (see that function's own doc
+/// comment) -- `0` for the common case (no leading `../` among this
+/// invocation's own paths). Baked into `Record::chdir` below so the
+/// eventual builder runs this compile from the matching nested
+/// position, where its own unchanged relative argv (e.g. `../hash.cc`)
+/// resolves correctly.
 /// `batch_groups`: `{ <relative-source-path> = <group-key> }`, mirrors
 /// `DYNDRV_BATCH_GROUPS`.
 pub fn cc_to_node(
@@ -75,6 +128,7 @@ pub fn cc_to_node(
     coreutils_basename: &str,
     stdenv_cc_basename: &str,
     tree_basename: &str,
+    tree_up_depth: usize,
     batch_groups: &std::collections::HashMap<String, String>,
 ) -> Decision {
     let has_compile_flag = argv.iter().any(|a| a == "-c");
@@ -213,9 +267,19 @@ pub fn cc_to_node(
     srcs.extend(extra_store_paths(argv));
 
     let setup_cmd = format!(
-        "/nix/store/{coreutils_basename}/bin/cp -r /nix/store/{tree_basename}/. . && \
-         /nix/store/{coreutils_basename}/bin/chmod -R u+w . &&"
+        "{env_prefix}/nix/store/{coreutils_basename}/bin/cp -r /nix/store/{tree_basename}/. . && \
+         /nix/store/{coreutils_basename}/bin/chmod -R u+w . &&",
+        env_prefix = capture_wrapper_env(),
     );
+
+    // See `wrapper::stage_tree`'s own doc comment on `DYNDRV_TREE_UP_
+    // DIR_NAME`/nesting -- the SAME nested-position string, here for
+    // the compiled-shim code path instead of bash.
+    let chdir = if tree_up_depth == 0 {
+        None
+    } else {
+        Some(format!("{}/", crate::wrapper::DYNDRV_TREE_UP_DIR_NAME).repeat(tree_up_depth))
+    };
 
     let record = Record {
         key: batch_key,
@@ -223,6 +287,7 @@ pub fn cc_to_node(
         args: args_for_cc,
         srcs,
         setup_cmd: Some(setup_cmd),
+        chdir,
         chained_from: None,
         seed_from: None,
     };

@@ -54,6 +54,7 @@ fn read_record(path: &Path) -> Record {
         args: Vec::new(),
         srcs: Vec::new(),
         setup_cmd: None,
+        chdir: None,
         chained_from: None,
         seed_from: None,
     })

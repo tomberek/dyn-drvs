@@ -77,6 +77,7 @@ pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str) -> De
             args: args_for_ar,
             srcs,
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             seed_from: None,
         },
@@ -146,6 +147,7 @@ pub fn ranlib_to_node(
             args: args_for_ranlib,
             srcs,
             setup_cmd: None,
+            chdir: None,
             chained_from: None,
             seed_from: Some(SeedFrom {
                 from: real_archive_path,

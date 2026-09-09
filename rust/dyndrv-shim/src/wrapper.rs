@@ -119,8 +119,10 @@ where
 /// (source AND header) this invocation needs beyond what argv already
 /// names directly.
 /// `decide`: closure implementing `cc`'s own decision logic, given the
-/// RAW argv (unmodified -- `discoverTree` mode's whole point) and the
-/// freshly-staged tree's own store basename.
+/// RAW argv (unmodified -- `discoverTree` mode's whole point), the
+/// freshly-staged tree's own store basename, and the nested "cwd"
+/// depth (see `stage_tree`'s own doc comment) this invocation's own
+/// paths needed the tree staged at -- `0` for the common case.
 pub fn run_discover_tree<D, F>(
     client: &BuilderRpcClient,
     real_command: &str,
@@ -131,7 +133,7 @@ pub fn run_discover_tree<D, F>(
 ) -> anyhow::Result<()>
 where
     D: FnOnce(&[String]) -> Vec<String>,
-    F: FnOnce(&[String], &str) -> Decision,
+    F: FnOnce(&[String], &str, usize) -> Decision,
 {
     let orig_pwd = std::env::current_dir()
         .context("run_discover_tree: current_dir")?
@@ -204,13 +206,13 @@ where
     all_paths.sort();
     all_paths.dedup();
 
-    let tree_dir = stage_tree(&all_paths).context("run_discover_tree: stage_tree")?;
+    let (tree_dir, up_depth) = stage_tree(&all_paths, &argv).context("run_discover_tree: stage_tree")?;
     let tree_basename = client
         .add_to_store_nar("dyndrv-tree", &tree_dir)
         .context("run_discover_tree: add_to_store_nar")?;
     std::fs::remove_dir_all(tree_dir.parent().unwrap_or(&tree_dir)).ok();
 
-    match decide(&argv, &tree_basename.to_string()) {
+    match decide(&argv, &tree_basename.to_string(), up_depth) {
         Decision::Passthrough => exec_passthrough(real_command, orig_argv),
         Decision::Defer {
             record,
@@ -240,17 +242,96 @@ where
 /// binary replaces, the parent directory's own randomization is purely
 /// cosmetic -- kept anyway for trivial collision-avoidance across
 /// concurrent invocations sharing the same process's cwd.
-fn stage_tree(paths: &[String]) -> anyhow::Result<PathBuf> {
+///
+/// A real build routinely compiles from a directory ONE OR MORE LEVELS
+/// BELOW its own source root (meson's own convention, confirmed
+/// necessary by direct reproduction against NixOS/nix's own `nix-util`
+/// component: EVERY compile there runs `cc ... -c ../hash.cc ...`,
+/// `../` and all) -- `PathBuf::join` does NOT normalize `..` away, so a
+/// naive `tree_dir.join(p)` for such a path resolves OUTSIDE `tree_dir`
+/// entirely at the FILESYSTEM level (`tree_dir/../hash.cc` IS
+/// `tree_dir`'s own PARENT's `hash.cc`), identical to `wrapCommand.
+/// nix`'s own bash bug -- confirmed this is not a one-off: every single
+/// one of nix-util's ~90 translation units hit this identically, since
+/// meson's out-of-source-tree convention is uniform across the whole
+/// component.
+///
+/// Fixed the same way as `wrapCommand.nix`: an extra, fixed-name nested
+/// "cwd" chain inside `tree_dir`, deep enough that even the LARGEST
+/// `../` prefix among `paths` still lands inside the tree -- a path
+/// with `k` leading `../` segments is staged `(up_depth - k)` "cwd"
+/// levels down, exactly matching where it resolves once the eventual
+/// builder `cd`s into that same nested chain (via the returned
+/// `up_depth`, baked into `Record::chdir` by this function's own
+/// caller) before running the real command with `p`'s own text
+/// completely unchanged.
+///
+/// Returns `(tree_dir, up_depth)` -- `up_depth == 0` (the common case
+/// for every OTHER example/fixture this accelerator has been run
+/// against so far) means no nesting was needed at all.
+pub(crate) const DYNDRV_TREE_UP_DIR_NAME: &str = ".dyndrv-cwd";
+
+fn leading_up_depth(p: &str) -> usize {
+    let mut depth = 0;
+    let mut rest = p;
+    while let Some(r) = rest.strip_prefix("../") {
+        depth += 1;
+        rest = r;
+    }
+    depth
+}
+
+fn stage_tree(paths: &[String], argv: &[String]) -> anyhow::Result<(PathBuf, usize)> {
     let parent = std::env::temp_dir().join(format!("dyndrv-tree-parent-{}", std::process::id()));
     let tree_dir = parent.join("dyndrv-tree");
     std::fs::create_dir_all(&tree_dir)
         .with_context(|| format!("create_dir_all {}", tree_dir.display()))?;
+    let up_depth = paths.iter().map(|p| leading_up_depth(p)).max().unwrap_or(0);
+    // The eventual builder unconditionally `cd`s `up_depth` levels into
+    // `DYNDRV_TREE_UP_DIR_NAME/.../` before running the real command
+    // (see `cc.rs`'s own `chdir` computation -- the SAME depth),
+    // regardless of whether any INDIVIDUAL file this invocation stages
+    // happens to land there -- confirmed necessary by direct
+    // reproduction against NixOS/nix's own `nix-util` component: a
+    // compile whose own source has NO `../` prefix (staged at nesting
+    // level 0) but whose sibling `-I../include` flags still need
+    // `up_depth = 1` never triggers the per-file `create_dir_all`
+    // below for the nested directory ITSELF (nothing is ever staged
+    // strictly AT that nesting level for this invocation) -- without
+    // this, `cd .dyndrv-cwd/` failed outright ("No such file or
+    // directory") the moment a compile's own source happened to need
+    // zero nesting while its sibling headers needed some. Port of
+    // `wrapCommand.nix`'s own identical fix.
+    if up_depth > 0 {
+        let mut d = tree_dir.clone();
+        for _ in 0..up_depth {
+            d = d.join(DYNDRV_TREE_UP_DIR_NAME);
+        }
+        std::fs::create_dir_all(&d).with_context(|| format!("create_dir_all {}", d.display()))?;
+    }
     for p in paths {
         let src = Path::new(p);
         if !src.is_file() {
             continue;
         }
-        let dst = tree_dir.join(p);
+        let k = leading_up_depth(p);
+        let rest = &p[k * 3..];
+        let nest_prefix = DYNDRV_TREE_UP_DIR_NAME.repeat(up_depth - k);
+        let dst = if nest_prefix.is_empty() {
+            tree_dir.join(rest)
+        } else {
+            // `repeat` above concatenates with no separator -- insert
+            // "/" between each repetition and before `rest` via `join`
+            // over the split-by-name form instead of a bare `repeat`,
+            // matching the bash fix's own `dyndrvNestPrefix` loop
+            // exactly (one `dyndrvUpDirName/` segment per nesting
+            // level).
+            let mut d = tree_dir.clone();
+            for _ in 0..(up_depth - k) {
+                d = d.join(DYNDRV_TREE_UP_DIR_NAME);
+            }
+            d.join(rest)
+        };
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create_dir_all {}", parent.display()))?;
@@ -258,7 +339,40 @@ fn stage_tree(paths: &[String]) -> anyhow::Result<PathBuf> {
         std::fs::copy(src, &dst)
             .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     }
-    Ok(tree_dir)
+    // A real (unaccelerated) meson/ninja build always creates its
+    // WHOLE build-directory skeleton up front, during `configurePhase`,
+    // before any compiler ever runs -- so a compiler's own `-MF
+    // <relative-dir>/<file>.d` dependency-file output can always
+    // assume its own parent directory already exists. This
+    // accelerator's staged tree, by contrast, only ever contains what
+    // the caller's own discovery scan found (real SOURCE/HEADER
+    // *inputs*), never an output-only directory nothing `-include`s.
+    // Confirmed necessary by direct reproduction against NixOS/nix's
+    // own `nix-util` component (same gap `wrapCommand.nix`'s own
+    // identical fix addresses) -- pre-create every argv element's own
+    // dirname here, at the SAME nesting depth this invocation's own
+    // `up_depth` computed above, covering `-MF`/`-MT`/`-o`-style
+    // relative-path outputs generically.
+    for a in argv {
+        if a.starts_with('/') {
+            continue;
+        }
+        let k = leading_up_depth(a);
+        if k > up_depth {
+            continue;
+        }
+        let rest = &a[k * 3..];
+        let mut d = tree_dir.clone();
+        for _ in 0..(up_depth - k) {
+            d = d.join(DYNDRV_TREE_UP_DIR_NAME);
+        }
+        let dst = d.join(rest);
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create_dir_all {}", parent.display()))?;
+        }
+    }
+    Ok((tree_dir, up_depth))
 }
 
 /// Shared tail dispatch -- both `run_plain` and `run_discover_tree`
@@ -478,7 +592,17 @@ fn rewrite_argv_element(client: &BuilderRpcClient, a: &str) -> anyhow::Result<St
     Ok(a.to_string())
 }
 
-fn exec_passthrough(real_command: &str, argv: &[String]) -> anyhow::Result<()> {
+/// Execs straight to `real_command` with the original argv, never
+/// returning on success -- the mechanism BOTH the per-invocation
+/// `Decision::Passthrough` case (autoconf-probe detection, `argv`-shape
+/// heuristics) and the blanket `DYNDRV_BYPASS` env-var override (see
+/// `wrapCommand.nix`'s own doc comment for the full "why this exists
+/// separately from Passthrough" rationale -- meson/cmake's own
+/// configure-time compiler probes aren't `conftest*`-named, so argv-shape
+/// heuristics never catch them) both resolve to. `pub` so `main`
+/// (`bin/dyndrv-shim.rs`) can call it directly for the `DYNDRV_BYPASS`
+/// check, before any daemon connection is even attempted.
+pub fn exec_passthrough(real_command: &str, argv: &[String]) -> anyhow::Result<()> {
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new(real_command).args(argv).exec();
     Err(anyhow::anyhow!("exec {real_command} failed: {err}"))
