@@ -259,6 +259,36 @@ pub fn cc_to_node(
         args_for_cc.push("$out".to_string());
     }
 
+    // A LINK invocation compiled with `-flto` can leave `libm` symbols
+    // (`pow`, seen in practice) unresolved at link time -- see
+    // `mkAcceleratedStdenv.nix`'s own matching `argvForCc'` header
+    // comment for the full rationale (confirmed by direct reproduction
+    // against NixOS/nix's own `nix-util` component, and confirmed the
+    // fix by directly appending `-lm` to the exact failing link
+    // command). The SAME gap also drops core `libstdc++` runtime
+    // symbols (confirmed against `nix-store`'s own `libnixstore.so`
+    // link, which -- like `nix-util`'s -- goes through the plain `cc`,
+    // not `c++`) -- `-lstdc++` is appended alongside `-lm` for the
+    // same reason. Scoped to LINK invocations (`!has_compile_flag`)
+    // whose own argv already contains `-flto` -- a project that never
+    // uses LTO is completely unaffected.
+    if !has_compile_flag && args_for_cc.iter().any(|a| a.starts_with("-flto")) {
+        args_for_cc.push("-lm".to_string());
+        args_for_cc.push("-lstdc++".to_string());
+    }
+
+    // See `mkAcceleratedStdenv.nix`'s own matching `argvForCcFinal`
+    // header comment for the full rationale: `separateDebugInfo`'s own setup
+    // hook (the only thing that ever exports `NIX_SET_BUILD_ID`) never
+    // runs during phase 1's real `buildPhase` (`phases/split.nix`
+    // unconditionally forces `separateDebugInfo = false` there), so
+    // there's no ambient signal this binary could read either --
+    // appending unconditionally on every link step is required,
+    // harmless for a caller that never wants separate debug info.
+    if !has_compile_flag {
+        args_for_cc.push("-Wl,--build-id=sha1".to_string());
+    }
+
     let mut srcs = vec![
         coreutils_basename.to_string(),
         stdenv_cc_basename.to_string(),

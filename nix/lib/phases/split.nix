@@ -281,7 +281,203 @@ stdenv.mkDerivation (
   // {
     inherit pname version;
     src = sandboxedResult;
-    phases = [ "unpackPhase" ] ++ finalReplayPhases;
+    phases = [ "unpackPhase" "dyndrvCdToBuildDir" ] ++ finalReplayPhases;
+    # `replay`'s own inherited `sourceRoot` (if the ORIGINAL package set
+    # one) must be explicitly CLEARED here, not just left unset in THIS
+    # attrset -- `replay // {...}` never REMOVES a key `replay` itself
+    # already set, confirmed by direct reproduction: omitting this
+    # override left the ORIGINAL, phase-1-only `sourceRoot` value
+    # (`nix-util`'s own `"${src.name}/./src/libutil"`) still active,
+    # and `runPhase`'s own hardcoded post-`unpackPhase` step (`stdenv`'s
+    # `setup` script itself) unconditionally `cd`s into
+    # `"${sourceRoot:-.}"` after ANY phase literally named
+    # `"unpackPhase"` finishes -- kept a no-op here (`sourceRoot`
+    # deliberately left unset) since `sandboxedResult`'s own tree ROOT
+    # already IS phase 1's OWN resolved `buildPhase` cwd (`shim.
+    # collectStubs`'s own `dyndrv_buildRoot = "."`, captured relative to
+    # that exact cwd) -- no `cd` needed at all to reach it.
+    sourceRoot = ".";
+    # meson bakes phase 1's own PLACEHOLDER `$out` (the exact value
+    # `$dyndrvPhase1Out` holds during `dyndrvCdToBuildDir`/
+    # `dyndrvRestoreOutput` above -- an absolute, `.drv`-suffixed
+    # string, e.g. `/nix/store/AAAA-nix-util-c-2.36.0pre.drv`, per
+    # this file's own `name = "${pname}-${version}.drv"` convention)
+    # directly into the TEXT of any `.pc` file it installs
+    # (`prefix=...`) -- unlike the tree-content DESTDIR gap fixed in
+    # `dyndrvRestoreOutput` above, this is baked into a FILE'S OWN
+    # CONTENT, not its location, so no amount of moving/hoisting the
+    # tree fixes it: a downstream component that later reads this
+    # `.pc` file back (e.g. `nix-cli`'s own `dependency('nix-util-c-
+    # whole-archive')`) gets a linker `cannot find .../nix-util-c-
+    # 2.36.0pre.drv/lib/libnixutilc.a: No such file or directory` --
+    # confirmed by direct reproduction against NixOS/nix's own
+    # `nix-cli` component specifically (the ONLY consumer, among every
+    # component built so far, of another component's own `.pc` file
+    # via pkg-config -- every earlier component only ever consumed
+    # ordinary compiled libraries, never pkg-config metadata).
+    # Appended to `postFixup` (NOT `dyndrvRestoreOutput`, which runs
+    # BEFORE `fixupPhase`'s own `_multioutDevs` split relocates `.pc`
+    # files from `$out` to the real `$dev` -- confirmed necessary by
+    # direct reproduction: scanning `$out` alone in `dyndrvRestoreOutput`
+    # found nothing, since `lib/pkgconfig` hadn't moved to `$dev` yet)
+    # -- `postFixup` fires at the very END of `fixupPhase`, after every
+    # `preFixupHook` (including `_multioutDevs`) has already run, so
+    # every output's own FINAL `.pc` file location is scanned.
+    # `getAllOutputNames`: stdenv's own multi-output-aware helper,
+    # always available regardless of whether this package opted into
+    # multiple outputs. `[ -n "''${dyndrvPhase1Out:-}" ]`: a no-op for
+    # any non-meson build (the var is simply never set there).
+    # Rewrites to `$out` specifically (not whichever output a given
+    # `.pc` file itself landed in, e.g. `$dev`) -- confirmed via
+    # direct reading of a real captured `.pc` file: `libdir=${prefix}/
+    # lib` derives from this SAME `prefix` variable, and the actual
+    # `.a`/`.so` files it names always live under `$out/lib`
+    # regardless of which output the `.pc` file's own OWN location
+    # ends up at (its OTHER variable, `includedir`, already correctly
+    # points at the real `$dev` on its own, set from a live env var at
+    # configure time rather than baked from this SAME placeholder).
+    postFixup = (replay.postFixup or "") + ''
+      if [ -n "''${dyndrvPhase1Out:-}" ]; then
+        for dyndrvOutputName in $(getAllOutputNames); do
+          dyndrvOutputPath="''${!dyndrvOutputName}"
+          for dyndrvPcFile in $(${pkgs.findutils}/bin/find "$dyndrvOutputPath" -iname "*.pc" 2>/dev/null); do
+            ${pkgs.gnused}/bin/sed -i "s|$dyndrvPhase1Out|$out|g" "$dyndrvPcFile"
+          done
+        done
+      fi
+    '';
+    dyndrvCdToBuildDir = ''
+      runHook preDyndrvCdToBuildDir
+      # `.dyndrv-build-relpath` (see `shim.collectStubs`'s own header
+      # comment) exists IFF phase 1 found a `build.ninja` -- i.e. this
+      # was an out-of-source, meson-style build whose own
+      # `configurePhase` `cd`ed one level BELOW `sourceRoot` before
+      # `buildPhase` ever ran (meson's own `mesonConfigurePhase` setup-
+      # hook: `meson setup build && cd build`). Its CONTENT is phase
+      # 1's own absolute build-dir path, relative to `NIX_BUILD_TOP`
+      # (e.g. "source/src/libutil/build") -- reconstructing this EXACT
+      # SAME absolute position here (both sandboxes fix `NIX_BUILD_TOP`
+      # at "/build", confirmed by direct reproduction) is required
+      # because meson bakes phase 1's own absolute paths into MULTIPLE
+      # generated files, not just `build.ninja` -- `meson-private/
+      # install.dat` (a pickled Python object) was ALSO confirmed, by
+      # direct reproduction, to record an absolute header path that a
+      # synthetic staging name (a plain `.dyndrv-build/` subdirectory,
+      # tried first and found insufficient) does NOT match, causing
+      # meson's own installer to find a symlink where it expected a
+      # real file and refuse to install it ("Tried to install
+      # something that isn't a file"). Matching the REAL absolute
+      # position makes every one of these baked references correct
+      # "for free," with no per-file special-casing needed at all.
+      if [ -f .dyndrv-build-relpath ]; then
+        dyndrvRelpath=$(cat .dyndrv-build-relpath)
+        dyndrvParentRelpath=$(dirname "$dyndrvRelpath")
+        rm -f .dyndrv-build-relpath
+        # Stage everything into a TEMP holder first, then relocate that
+        # holder in one atomic `mv` -- `dyndrvRelpath` can be MULTIPLE
+        # segments deep (e.g. "source/src/libutil/build"), and
+        # `mkdir -p`-ing it directly beforehand would create a
+        # top-level entry (e.g. "source") that a subsequent `for f in
+        # *` loop would then re-match and try to move INTO its own
+        # descendant -- confirmed by direct reasoning about `mkdir -p`
+        # + glob ordering, avoided entirely by never creating any part
+        # of the target path until every real file is already
+        # sitting safely inside the temp holder.
+        mkdir .dyndrv-tmp-root
+        for f in * .[!.]*; do
+          case "$f" in
+            .dyndrv-carried-up1|.dyndrv-tmp-root|'*'|'.[!.]*') continue ;;
+          esac
+          [ -e "$f" ] || continue
+          mv -- "$f" .dyndrv-tmp-root/
+        done
+        mkdir -p "$dyndrvParentRelpath"
+        mv .dyndrv-tmp-root "$dyndrvRelpath"
+        # `dyndrvParentRelpath` is exactly one level up from
+        # `dyndrvRelpath` -- the SAME level every carried-forward
+        # `../<path>` reference (see `shim.collectStubs`'s own header
+        # comment on `.dyndrv-carried-up1`) needs to resolve against.
+        if [ -d .dyndrv-carried-up1 ]; then
+          cp -r .dyndrv-carried-up1/. "$dyndrvParentRelpath"/
+          rm -rf .dyndrv-carried-up1
+        fi
+        # `cp` (no `-p`) stamps every one of these newly-carried files
+        # with "now" -- newer than the already-built `.cc.o` symlinks
+        # sitting in `$dyndrvRelpath`, which `unpackPhase`'s own mtime
+        # normalization (see that phase's header comment) ran BEFORE
+        # this copy ever happened. Left alone, ninja's own restat
+        # check sees every one of these sources as freshly changed and
+        # recompiles the WHOLE tree via phase 2's real, unaccelerated
+        # compiler -- confirmed by direct reproduction: every `.cc.o`
+        # got rebuilt from scratch despite being a real, already-
+        # resolved output. Re-normalize here, after the copy, for the
+        # same reason `unpackPhase` does it at all.
+        find "$dyndrvParentRelpath" -not -type l -exec touch -d @1 {} +
+        cd "$dyndrvRelpath"
+        # A build tool that bakes ABSOLUTE paths into generated build
+        # state during `configurePhase` (meson's own `build.ninja`,
+        # confirmed by direct reproduction against NixOS/nix's own
+        # `nix-util` component: `build.ninja` literally references
+        # `/build/source/src/libutil`, phase 1's OWN absolute source
+        # directory, which never exists in phase 2's entirely
+        # separate sandbox) will otherwise try to REGENERATE that
+        # state the moment `installPhase` runs `ninja install` --
+        # ninja's own `build.ninja` file declares a real EDGE (rule
+        # `REGENERATE_BUILD`) with `build.ninja` itself as the
+        # OUTPUT and every meson.build/`.version`/etc SOURCE-tree
+        # file as its own DEPENDENCY, and ninja unconditionally
+        # checks whether that edge's dependencies changed on EVERY
+        # invocation, regardless of any file's own mtime -- a
+        # dependency that's simply MISSING (as every one of THESE
+        # is, in phase 2's own tree) is always treated as "changed",
+        # so a mtime `touch` alone (confirmed insufficient by direct
+        # reproduction) can never suppress this. Deleting the whole
+        # EDGE -- the `build build.ninja: REGENERATE_BUILD ...` line
+        # itself PLUS every immediately-following indented OPTION
+        # line (ninja's own multi-line syntax for a build statement's
+        # `pool =`/etc -- confirmed necessary by direct reproduction:
+        # deleting ONLY the first line orphaned its own `pool =
+        # console` option line, which ninja then rejected outright,
+        # "unexpected indent", having no preceding `build` statement
+        # left to attach to) -- removes the edge entirely, so ninja
+        # has no reason to ever invoke `meson --internal regenerate`
+        # at all -- it just proceeds straight to the already-fully-
+        # resolved `install` target, exactly what phase 2 needs
+        # (every actual compile/link output was already resolved by
+        # phase 1; nothing here ever needs reconfiguring).
+        if [ -f build.ninja ]; then
+          awk '
+            /^build build\.ninja: REGENERATE_BUILD / { skip = 1; next }
+            skip && /^ / { next }
+            { skip = 0; print }
+          ' build.ninja > build.ninja.dyndrv-tmp
+          mv build.ninja.dyndrv-tmp build.ninja
+        fi
+      fi
+      # `.dyndrv-phase1-out` (see `shim.collectStubs`'s own header
+      # comment) exists IFF phase 1 found a `build.ninja` -- meson
+      # bakes its own `--prefix` in at CONFIGURE time (phase 1) and
+      # NEVER re-reads a fresh `$out` at install time the way
+      # autotools/make does (`make install DESTDIR=...`) -- `ninja
+      # install` (== `meson install --no-rebuild`) instead only ever
+      # honors `$DESTDIR`, meson's own PREPEND mechanism: installed
+      # content lands at `$DESTDIR/<baked-prefix>/...`, not
+      # `$DESTDIR/...` directly. Exporting it here, unconditionally
+      # once this file is known to be a meson build, means
+      # `installPhase` (which runs immediately after this phase)
+      # writes everything under phase 2's own real `$out` after all --
+      # `dyndrvPhase1Out` (a plain, non-`local` variable -- every phase
+      # here runs sequentially in the SAME shell process, so this
+      # persists into `dyndrvRestoreOutput` below without needing a
+      # file) records the exact nested subpath to hoist back out of,
+      # since `$DESTDIR` PREPENDS rather than substitutes.
+      if [ -f .dyndrv-phase1-out ]; then
+        dyndrvPhase1Out=$(cat .dyndrv-phase1-out)
+        rm -f .dyndrv-phase1-out
+        export DESTDIR="$out"
+      fi
+      runHook postDyndrvCdToBuildDir
+    '';
     dyndrvRestoreOutput = ''
       runHook preDyndrvRestoreOutput
       if [ -d ${dyndrvPlaceholderOut} ]; then
@@ -315,12 +511,54 @@ stdenv.mkDerivation (
         _multioutDocs
         _multioutDevs
       fi
+      # `dyndrvPhase1Out` (see `dyndrvCdToBuildDir` above) is only set
+      # for a meson build -- `meson install`'s own `$DESTDIR` PREPENDS
+      # itself onto the baked-in prefix rather than substituting for
+      # it, so the real content is sitting at `$out$dyndrvPhase1Out`
+      # (a literal string concatenation -- both `$out` and
+      # `$dyndrvPhase1Out` are absolute paths in their own right, e.g.
+      # `$out` == `/nix/store/AAAA-nix-util-2.36.0pre` and
+      # `$dyndrvPhase1Out` == `/nix/store/BBBB-nix-util-2.36.0pre.drv`,
+      # giving the nested `/nix/store/AAAA-.../nix/store/BBBB-...`)
+      # rather than directly under `$out` itself -- hoist it up one
+      # level, the same way the autotools-specific restore step above
+      # does for its own differently-shaped baked path.
+      if [ -n "''${dyndrvPhase1Out:-}" ] && [ -d "$out$dyndrvPhase1Out" ]; then
+        dyndrvHoistTmp="$out/.dyndrv-hoist-tmp"
+        mkdir -p "$dyndrvHoistTmp"
+        cp -r "$out$dyndrvPhase1Out"/. "$dyndrvHoistTmp"/
+        rm -rf "''${out:?}''${dyndrvPhase1Out:?}"
+        cp -r "$dyndrvHoistTmp"/. "$out"/
+        rm -rf "$dyndrvHoistTmp"
+        chmod -R u+w "$out"
+      fi
       runHook postDyndrvRestoreOutput
     '';
     unpackPhase = ''
       runHook preUnpack
       cp -r "$src"/. .
       chmod -R u+w .
+      # Every REAL file just copied here gets "now" as its own mtime
+      # (`cp`, no `-p`) -- but a stub's own resolved OUTPUT is a
+      # symlink whose target is an immutable, already-built store
+      # path, always fixed at Nix's own epoch-1 mtime convention --
+      # so it's ALWAYS "older" than every freshly-copied real file
+      # sitting right next to it. Any build tool that decides
+      # staleness by mtime comparison (ninja's own restat check,
+      # `make`'s implicit rules) sees every real input as newer than
+      # an already-fully-built output and reschedules it for a
+      # pointless -- or, worse, WRONG, via phase 2's real,
+      # unaccelerated compiler, silently bypassing per-TU registration
+      # entirely -- rebuild. Confirmed by direct reproduction against
+      # nix-util's own `ninja install`: every `.cc.o`, despite being a
+      # real, already-resolved symlink to a fully-built store path,
+      # got recompiled from scratch, defeating the whole point of
+      # per-TU acceleration. Forcing every REGULAR (non-symlink)
+      # file's mtime down to that same fixed epoch makes every
+      # already-built output look at least as fresh as its own real
+      # inputs -- symlinked stub outputs are already that old, so
+      # this has no effect on them.
+      find . -not -type l -exec touch -d @1 {} +
       runHook postUnpack
     '';
   }

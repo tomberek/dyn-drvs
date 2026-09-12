@@ -609,6 +609,23 @@ let
       let
         outputFile = if outIdx != (-1) then builtins.elemAt argv (outIdx + 1) else implicitOutputFile;
         treeBasename = builtins.getEnv "DYNDRV_TREE_BASENAME";
+        # `ccShim`/`cxxShim` (below) share this IDENTICAL `toNode`
+        # string -- both need the SAME discovery/deferral logic, only
+        # the underlying real tool binary differs -- so it can't just
+        # splice in a single fixed tool path at DEFINITION time; doing
+        # so baked `cc` into `record.tool` even for a `c++`-invoked
+        # deferral (meson's own `g++`/`cpp_LINKER` rule), which then
+        # ACTUALLY LINKED via plain `cc` at build time instead of
+        # `c++`/`g++` -- confirmed by direct reproduction against
+        # `nix-util-c`'s own link: missing `operator new`/`delete`,
+        # `__cxa_throw`, RTTI vtables (core runtime symbols only
+        # `libstdc++` provides, which `cc` alone never auto-links the
+        # way `c++` does). `wrapCommand.nix`'s own wrapper script
+        # exports `DYNDRV_REAL_COMMAND` (== this invocation's own
+        # `realCommand`) before ever calling this nested
+        # `nix-instantiate`, so reading it back here gets the tool
+        # THIS specific shim actually shadows.
+        realCommand = builtins.getEnv "DYNDRV_REAL_COMMAND";
         # See `wrapCommand.nix`'s own header comment on
         # `DYNDRV_TREE_UPDEPTH`/`dyndrvUpDirName` -- the nested-position
         # string for THIS invocation, computed here (not in
@@ -752,6 +769,78 @@ let
           else
             argv ++ [ "-o" "$out" ];
 
+        # A LINK invocation compiled with `-flto` can leave `libm`
+        # symbols (`pow`, seen in practice) unresolved at link time --
+        # confirmed by direct reproduction against NixOS/nix's own
+        # `nix-util` component: `std::pow` calls in two SEPARATELY-
+        # compiled translation units (`util.cc`/`linux/cgroup.cc`)
+        # linked with `undefined reference to 'pow'` under LTO, even
+        # though the IDENTICAL component links fine, with the
+        # IDENTICAL flags, when built unaccelerated (confirmed by
+        # direct A/B rebuild: neither a unity-build nor a per-TU
+        # unaccelerated build of the same component ever needs `-lm`
+        # explicitly) -- the gap is specific to GCC's LTO partitioning
+        # across SEPARATELY-compiled, individually-registered `.o`
+        # objects (each its own CA derivation here) rather than one
+        # shared ninja invocation's own LTRANS decisions. Confirmed by
+        # direct reproduction that appending `-lm` to the EXACT
+        # failing link command resolves it. Scoped to LINK invocations
+        # (`!hasCompileFlag`) whose own argv already contains `-flto`
+        # (matching, not guessing at, what triggered the gap) -- a
+        # project that never uses LTO is completely unaffected.
+        #
+        # The SAME gap ALSO drops core `libstdc++` runtime symbols
+        # (`operator new`/`delete`, `__cxa_throw`, RTTI vtables, ...)
+        # -- confirmed by direct reproduction against NixOS/nix's own
+        # `nix-store` component: meson invokes the plain `cc` (not
+        # `c++`) for its final `.so` link, exactly like `nix-util`'s
+        # own `libnixutil.so` link, so nothing auto-links `libstdc++`
+        # at all; a real, unaccelerated meson/ninja build gets away
+        # with this because ONE shared ninja invocation's own LTO
+        # partitioning happens to resolve these internally, but per-TU
+        # acceleration's SEPARATE, individually-registered `.o`
+        # derivations hit the identical class of gap `-lm` above fixes
+        # -- so `-lstdc++` is appended alongside it, under the exact
+        # same condition.
+        argvForCc' =
+          if !hasCompileFlag && builtins.any (a: hasPrefix "-flto" a) argvForCc then
+            argvForCc ++ [ "-lm" "-lstdc++" ]
+          else
+            argvForCc;
+
+        # bintools-wrapper's own `ld` injects `--build-id=''${NIX_BUILD_ID_
+        # STYLE:-sha1}` whenever `NIX_SET_BUILD_ID_<suffixSalt>` is set
+        # (`separate-debug-info.sh`'s own setup hook exports the BARE
+        # form unconditionally, whenever `separateDebugInfo = true`) --
+        # but `phases/split.nix`'s own phase 1 unconditionally forces
+        # `separateDebugInfo = false` (to avoid producing a meaningless
+        # standalone debug output there -- see that file's own header
+        # comment), so that setup hook never runs during the REAL
+        # `buildPhase` where every per-TU compile/link actually
+        # happens. `toNode` itself is constructed ONCE, when
+        # `mkAcceleratedStdenv` is first called -- long before any
+        # particular caller's OWN `separateDebugInfo` value is even
+        # known -- so there's no ambient signal to read at all here,
+        # unlike `-lm`-under-LTO above (which detects an ALREADY-
+        # PRESENT `-flto` flag in argv, not an external setting).
+        # Appending this UNCONDITIONALLY on every link step is
+        # therefore the only option that actually works: harmless for
+        # a caller that never sets `separateDebugInfo` (the flag is
+        # simply unused there), but required for one that does --
+        # confirmed necessary by direct reproduction against NixOS/
+        # nix's own `nix-util` component (`readelf -n` on the linked
+        # `.so` showed no `.note.gnu.build-id` section at all without
+        # this, which then broke `separateDebugInfo`'s own
+        # `_separateDebugInfo` fixup hook outright: "could not find
+        # build ID of $i, skipping", then "failed to produce output
+        # path for output 'debug'" since nothing ever got created
+        # under `$debugOutput/lib/debug/.build-id`).
+        argvForCcFinal =
+          if !hasCompileFlag then
+            argvForCc' ++ [ "-Wl,--build-id=sha1" ]
+          else
+            argvForCc';
+
         # Any argv element (or wrapper-env-var VALUE, e.g. `NIX_CFLAGS_
         # COMPILE`'s own `-isystem /nix/store/...-boost-...-dev/include`
         # -- see `wrapperEnvPairs`'s own header comment on why this
@@ -819,8 +908,8 @@ let
           record = builtins.toJSON (
             {
               key = batchKey;
-              tool = "${realCc}";
-              args = argvForCc;
+              tool = if realCommand == "" then "${realCc}" else realCommand;
+              args = argvForCcFinal;
               srcs = srcsList;
               # `chmod -R u+w .` AFTER `cp -r`, not before: `cp -r`
               # preserves the read-only Nix store source's permissions on

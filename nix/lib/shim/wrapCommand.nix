@@ -341,6 +341,25 @@ in
 
         export PATH="${nixPackage}/bin:$PATH"
         export NIX_CONFIG='extra-experimental-features = nix-command ca-derivations dynamic-derivations'
+        # `toNode` (the NESTED `nix-instantiate --eval` this script's own
+        # `computeNodeScript` below spawns) needs to know THIS wrapper's
+        # own `realCommand` -- `mkAcceleratedStdenv.nix`'s `ccShim`/
+        # `cxxShim` share the IDENTICAL `toNode` string (both need the
+        # SAME discovery/deferral logic; only the underlying tool binary
+        # differs), so `toNode` can't just splice in a single fixed
+        # `''${realCc}` at DEFINITION time -- that bakes `cc` into
+        # `record.tool` even for a `c++`-invoked deferral, which then
+        # ACTUALLY LINKS via plain `cc` at build time instead of `c++`/
+        # `g++`, and `cc` alone never auto-links `libstdc++` the way
+        # `c++` does (confirmed by direct reproduction against
+        # `nix-util-c`'s own link: missing `operator new`/`delete`,
+        # `__cxa_throw`, RTTI vtables -- core runtime symbols only
+        # `libstdc++` provides). `nix-instantiate` inherits this WHOLE
+        # shell's own environment (already relied on for `NIX_SET_
+        # BUILD_ID`/`NIX_CFLAGS_COMPILE`/etc., see `wrapperEnvPairs`),
+        # so exporting it here lets `toNode` read it back via
+        # `builtins.getEnv "DYNDRV_REAL_COMMAND"`.
+        export DYNDRV_REAL_COMMAND="${realCommand}"
 
         ${readStubFn}
 
@@ -460,6 +479,11 @@ in
 
         export PATH="${nixPackage}/bin:$PATH"
         export NIX_CONFIG='extra-experimental-features = nix-command ca-derivations dynamic-derivations'
+        # See this file's OTHER `discoverTree == null` branch's own
+        # matching comment on `DYNDRV_REAL_COMMAND` above -- same
+        # reason, same mechanism -- this is the branch `ccShim`/
+        # `cxxShim` (both set `discoverTree`) actually reach.
+        export DYNDRV_REAL_COMMAND="${realCommand}"
 
         ${readStubFn}
 

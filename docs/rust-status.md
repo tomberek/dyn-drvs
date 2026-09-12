@@ -827,7 +827,7 @@ own `cargo test`/`clippy`, unchanged before/after):
 With all five fixed, all 76 translation units now compile and LINK
 (`[76/76] Linking target libnixutil.so.2.36.0`) — the first time this
 accelerator has built a real, substantial multi-file component all
-the way to a link step. The link itself currently fails with
+the way to a link step. The link itself initially failed with
 `undefined reference to 'pow'` under LTO (`-flto=auto`, meson's
 `release` buildtype default) — confirmed via direct A/B testing NOT
 to be caused by any of the five fixes above: both a unity-build and a
@@ -837,25 +837,296 @@ being compiled and registered as a SEPARATE, isolated CA derivation
 rather than one shared ninja invocation (GCC's LTO partitioning
 across the 76 separately-compiled objects resolves `std::pow` calls
 in `util.cc`/`linux/cgroup.cc` differently than when ninja compiles
-and links them all within one build tree) — open as follow-on work,
-see below.
+and links them all within one build tree). Fixed by unconditionally
+appending `-lm` to any link invocation (`!hasCompileFlag`) whose own
+argv already contains `-flto` — confirmed the fix directly by patching
+a failing link derivation's own JSON (`nix derivation add`) and
+rebuilding successfully — mirrored in both `mkAcceleratedStdenv.nix`
+(`argvForCc'`) and Rust `cc.rs` (`cc_to_node`).
+
+Getting all the way to a real, installed `nix-util` output (not just
+a successful link) surfaced four MORE bugs beyond the original five,
+each one layer deeper than the last:
+
+6. **Phase 2's inherited `sourceRoot` breaking `runPhase`'s automatic
+   `cd`** (`phases/split.nix`): `stdenv`'s own `setup` script
+   unconditionally `cd`s into `"${sourceRoot:-.}"` after ANY phase
+   literally named `"unpackPhase"` finishes — since `phases/split.nix`
+   does `replay // {...}` (a shallow merge that does NOT remove keys
+   `replay` already set), the ORIGINAL package's own `sourceRoot`
+   (e.g. `"${src.name}/./src/libutil"`) stayed active in phase 2 even
+   though phase 2's own `unpackPhase` body is a plain flat `cp -r`.
+   Fixed by explicitly overriding `sourceRoot = ".";` in phase 2's own
+   attrset (confirmed: simply omitting an override is NOT the same as
+   clearing it).
+7. **ninja's own `build.ninja` regeneration check**: meson's own
+   `build.ninja` declares a `REGENERATE_BUILD` edge whose dependencies
+   are every `meson.build`/`.version`/etc SOURCE-tree file — ninja
+   unconditionally checks this edge on EVERY invocation, and since
+   phase 2's tree only ever carries the BUILD dir forward (not the
+   original source tree, by design), every one of those dependencies
+   is simply MISSING, which ninja always treats as "changed," so it
+   tries to `meson --internal regenerate` and fails outright. Fixed by
+   deleting the whole edge (the `build build.ninja: REGENERATE_BUILD
+   ...` line itself PLUS its own indented option lines, e.g. `pool =
+   console` — deleting only the first line orphans the second,
+   "unexpected indent") in a new synthetic `dyndrvCdToBuildDir` phase.
+8. **ninja's dependency-graph validation requiring source files to
+   exist even for already-built targets**: a SEPARATE, deeper gap than
+   #7 — even with the regen-check edge removed, `ninja install` still
+   refused to proceed at all (`'../archive.cc', needed by
+   'libnixutil.so.2.36.0.p/archive.cc.o', missing and no known rule to
+   make it`) because ninja's own graph-loading step validates that
+   EVERY declared dependency of EVERY build edge exists on disk,
+   regardless of whether that edge's own output is already fully
+   built. This affects both explicit SOURCE-file edge dependencies
+   (`../archive.cc`) and entire HEADER DIRECTORIES referenced only via
+   an `-I../include`-style compiler flag on an edge's own `ARGS` line
+   (never an edge's own explicit dependency at all). Fixed by having
+   `shim.collectStubs` parse `build.ninja` for every `../<path>` token
+   (files AND directories) and carry JUST those specific paths forward
+   from phase 1's own sandbox into a `.dyndrv-carried-up1/` subdir of
+   the submitted tree (not the whole original source tree a second
+   time), which `dyndrvCdToBuildDir` then reconstructs at the EXACT
+   absolute position phase 1's own `buildPhase` had (recorded via a
+   `.dyndrv-build-relpath` marker, relative to `NIX_BUILD_TOP`, always
+   `/build` in both sandboxes) — required because meson also bakes
+   phase 1's own absolute paths into OTHER generated state beyond
+   `build.ninja` (`meson-private/install.dat`, a pickled Python
+   object), so a synthetic staging name isn't enough; matching the
+   REAL absolute position makes every one of these baked references
+   resolve correctly for free. A related mtime bug surfaced alongside
+   this: `cp` (no `-p`) stamps every carried-forward/unpacked file
+   with "now," newer than an already-built `.o`'s own fixed epoch-1
+   store mtime, so ninja's restat check saw every source as freshly
+   changed and recompiled the WHOLE tree via phase 2's real,
+   unaccelerated compiler — silently defeating per-TU acceleration
+   without erroring at all. Fixed by normalizing every real file's
+   mtime to a fixed epoch after every copy step.
+9. **meson's own `--prefix` baked in at configure time, never
+   re-read at install time**: unlike autotools/make (`make install
+   DESTDIR=...`), `meson install` reads NO env var for its own
+   destination — `--prefix` is fully resolved during phase 1's
+   `configurePhase` and baked into `build.ninja`/`meson-private/
+   install.dat`. Since that baked prefix is phase 1's OWN placeholder
+   `$out` (a `builder-rpc-v0`-sandboxed value never meant to be a real
+   path), `ninja install` in phase 2 wrote everything under a literal,
+   nonsensical `$out/nix/store/<phase-1-hash>-nix-util-2.36.0pre.drv/
+   ...` path instead of phase 2's own real `$out` — which is why the
+   `debug` output was never created (nothing landed where `fixupPhase`
+   expected it) despite the link itself having a valid build-id.
+   Fixed via meson's own `--destdir`/`$DESTDIR` mechanism (confirmed
+   via `meson install --help`) — exporting `DESTDIR="$out"` in
+   `dyndrvCdToBuildDir` and then, in `dyndrvRestoreOutput`, hoisting
+   the resulting `$out$<phase-1-out>/...` nesting (`$DESTDIR` PREPENDS
+   onto the baked prefix, it doesn't substitute for it) back up to
+   `$out` directly.
+
+With all nine fixed, `try-it-out/examples/09-accelerate-nix-util.nix`
+now builds `nix-util` completely end to end: all 76 translation units
+compiled and registered as SEPARATE, individually content-addressed
+derivations (confirmed via build-log inspection — not unity-batched,
+not monolithic), linked, installed, and fixed up with a valid,
+separated debug output — the first real, substantial multi-file,
+meson-based nixpkgs component this accelerator has built all the way
+through.
+
+## Second real component: `nix-store` (task following on from `nix-util`)
+
+New example, `try-it-out/examples/10-accelerate-nix-store.nix`: same
+approach as example 09, one component deeper into NixOS/nix's own
+dependency graph -- `nix-store` (~102 `.cc` files, DIRECTLY depending
+on `nix-util`, plus `curl`/`sqlite`/`libseccomp` beyond nix-util's own
+dependency set). Two more real gaps surfaced getting this to build,
+both fixed:
+
+10. **`DYNDRV_BYPASS` bracketing doesn't propagate across a
+    multi-component scope's own dependency wiring**: example 09's
+    `overrideAttrs` was called on the single component being built
+    directly; `nix-store` pulls in `nix-util` as ITS OWN build input,
+    resolved through the SAME `nixSrcFlake.lib.makeComponents` scope
+    -- an `overrideAttrs` on `scoped.nix-store` alone does NOT
+    propagate to `nix-util` as resolved via that scope, so
+    `nix-util`'s own meson configure step never got the bypass,
+    deferring its compiler/linker-detection probes as stubs instead
+    of running them synchronously, and failing outright ("Unknown
+    linker(s): [['ar']]" — meson's own linker-detection probe seeing a
+    batch-pending stub exit status instead of a real one). Fixed in
+    the example itself (not the library) by using `overrideScope` to
+    bracket EVERY component in the scope that needs it, not just the
+    top-level one being built.
+11. **The `-lm`/LTO gap also drops core `libstdc++` runtime symbols**,
+    not just `libm`: confirmed by direct reproduction against
+    `nix-store`'s own `libnixstore.so` link — meson invokes the plain
+    `cc` (not `c++`) for this link, exactly like `nix-util`'s own
+    `libnixutil.so` link, so nothing auto-links `libstdc++` at all,
+    and the SAME LTO-partitioning-across-separately-registered-`.o`
+    gap that dropped `libm` symbols for `nix-util` also drops
+    `operator new`/`delete`, `__cxa_throw`, and RTTI vtables here.
+    Fixed by extending the existing `-lm`-under-`-flto` fix
+    (`mkAcceleratedStdenv.nix`'s `argvForCc'`, Rust `cc.rs`'s
+    `cc_to_node`) to also append `-lstdc++`, under the identical
+    condition.
+
+A THIRD gap was found and fixed proactively, before it could surface
+as a build failure — confirmed by direct reproduction against a
+minimal ninja fixture, not discovered via a real build error:
+
+12. **`shim.collectStubs`'s own `../`-reference carry-forward scan
+    (added for example 09's ninja "missing and no known rule to make
+    it" gap) only ever read `build.ninja`'s TEXT** — but a C23
+    `#embed "schema.sql"` directive (confirmed present in `nix-store`'s
+    own `local-store.cc`: `#embed "schema.sql"` / `#embed
+    "ca-specific-schema.sql"`) is tracked by gcc's own `-MD` depfile
+    exactly like an `#include`, and that tracking lands ONLY in
+    ninja's binary `.ninja_deps` log — it never appears as literal
+    text in `build.ninja` itself (confirmed by direct reproduction: a
+    minimal `#embed`-using translation unit produces a `build.ninja`
+    with zero occurrences of the embedded file's own name, while
+    `ninja -t deps <target>` correctly lists it as a tracked
+    dependency). Fixed by running `ninja -t deps` (no target arg,
+    dumping every already-logged target's own deps) as a second,
+    complementary source of `../`-prefixed paths to carry forward,
+    alongside the existing `build.ninja`-text scan.
+
+With all three fixed, `try-it-out/examples/10-accelerate-nix-store.nix`
+now builds `nix-store` completely end to end too — confirmed
+`local-store.cc` (the `#embed`-using file) compiled and registered as
+its own individual per-TU derivation, and the final `libnixstore.so`
+link, install, and debug-info separation all succeeded, mirroring
+`nix-util`'s own successful build.
+
+## The rest of the chain: `nix-fetchers` through the full `nix-cli`
+
+Continuing one component at a time (examples 11-16), mirroring the
+exact `overrideScope`-with-`DYNDRV_BYPASS` pattern established for
+`nix-store` (example 10) but bracketing every additional component
+pulled into the scope as the chain gets deeper:
+
+- `try-it-out/examples/11-accelerate-nix-fetchers.nix` (`nix-fetchers`)
+  and `try-it-out/examples/12-accelerate-nix-expr.nix` (`nix-expr`,
+  the language evaluator) both built completely with **zero new
+  accelerator-side fixes** needed. `nix-expr` is notable for two
+  architecturally novel `custom_target` mechanisms — a bison/flex
+  parser/lexer pair (`src/libexpr/meson.build`, built as a separate
+  `nixexpr-parser` static lib with unity/LTO explicitly disabled) and
+  a `generate-header` shell-based generator wrapping arbitrary input
+  files as C++ raw-string headers (`primops/meson.build`) — neither
+  needed a fix because both generators' own output files land
+  directly in the build directory itself, already covered by gcc's
+  existing `-MD`-based per-TU discovery, confirmed by direct build
+  success rather than assumed.
+- `try-it-out/examples/13-accelerate-nix-flake.nix` (`nix-flake`),
+  `try-it-out/examples/14-accelerate-nix-main.nix` (`nix-main`), and
+  `try-it-out/examples/15-accelerate-nix-cmd.nix` (`nix-cmd`) all
+  built completely, likewise with zero new fixes.
+
+Two more real bugs surfaced building the `-c` (C API) shim components
+and the final `nix-cli` executable itself
+(`try-it-out/examples/16-accelerate-nix-cli.nix`, bracketing all 8
+core components + 6 `-c` shims + `nix-cli` in one scope):
+
+13. **`record.tool` cc/c++ mismatch**: `mkAcceleratedStdenv.nix`'s
+    `toNode` is a single Nix-expression STRING embedded verbatim into
+    BOTH the `cc` shim's and the `c++` shim's own generated wrapper
+    scripts, and it hardcoded `record.tool = "${realCc}"` — an
+    OUTER-Nix interpolation baked identically into both at
+    `toNode`'s own definition time. A `c++`/`g++` invocation (which
+    meson uses for any C++ link, confirmed via a real captured
+    `build.ninja`'s `rule cpp_LINKER: command = g++ ...`) silently got
+    downgraded to plain `cc` at actual build time — and `cc` alone
+    never auto-links `libstdc++` the way `c++`'s own driver does.
+    Confirmed first via `nix-util-c` (a NON-LTO link still missing
+    `libstdc++` symbols, proving the earlier `-flto`-scoped `-lstdc++`
+    band-aid from the `nix-store` section above was masking a
+    different bug for THIS case, not the real fix). Fixed by
+    threading a new `DYNDRV_REAL_COMMAND` env var: exported by
+    `nix/lib/shim/wrapCommand.nix`'s generated wrapper script (both
+    branches) as `export DYNDRV_REAL_COMMAND="${realCommand}"`, read
+    back in `toNode` via `builtins.getEnv`, with `tool = if
+    realCommand == "" then "${realCc}" else realCommand;` (empty-string
+    fallback preserves old behavior for any caller not setting the
+    var). Confirmed the Rust shim path (`cc.rs`'s `cc_to_node`) was
+    already correctly parameterized by its own `real_cc` argument —
+    no bug there, only the bash `toNode` path had this issue.
+14. **`.pc`-file-baked placeholder path**: meson bakes phase 1's own
+    placeholder, `.drv`-suffixed `$out` (e.g.
+    `/nix/store/AAAA-nix-util-c-2.36.0pre.drv`, a real, resolved
+    content-addressed path during phase 1's own sandboxed build)
+    directly into the TEXT of any `.pc` file it installs — specifically
+    the `prefix=` line, confirmed via direct inspection of
+    `nix-util-c-whole-archive.pc`. `nix-cli` is the FIRST component in
+    the whole chain to consume ANOTHER component's installed
+    pkg-config metadata rather than an ordinary compiled library
+    directly (via `both_libraries()`'s `plugin-c-api`-gated
+    `-whole-archive.pc` files, consumed by
+    `src/nix/meson.build`'s `dependency('nix-util-c-whole-archive')`
+    etc. for static linking), so this was the first build to ever
+    read a `.pc` file back and hit the wrong path: `ld.bfd: cannot
+    find .../nix-util-c-2.36.0pre.drv/lib/libnixutilc.a: No such file
+    or directory`, repeated for all 6 `-c` components. Unlike the
+    DESTDIR/install-location gap (about WHERE files land), this is
+    about WHAT TEXT is baked into a file's own content — no amount of
+    moving the tree fixes it. Fixed with a new `postFixup` hook in
+    `nix/lib/phases/split.nix` (must run in `postFixup`, not the
+    earlier `dyndrvRestoreOutput` phase, since `_multioutDevs` — the
+    nixpkgs hook that relocates `.pc` files from `$out` to the real
+    `$dev` output — runs later, inside `fixupPhase`'s own
+    `preFixupHooks`): it iterates every output via
+    `getAllOutputNames` to find `.pc` files wherever `_multioutDevs`
+    put them, but always rewrites the placeholder to `$out` specifically
+    (not whichever output the `.pc` file itself landed in), since the
+    `.pc` file's `libdir=${prefix}/lib` must always resolve to where
+    the actual `.a`/`.so` files physically live, regardless of which
+    output the `.pc` file's own text ended up in.
+
+A separate, non-architectural bug was also found and fixed in the
+carry-forward mechanism while chasing bug 14 above:
+
+15. **`set -e`/`set -o pipefail` silently aborting the whole
+    carry-forward subshell**: `collectStubs.nix`'s carry-forward logic
+    runs three sequential commands (the `build.ninja` text grep, the
+    `ninja -t deps` pipeline, and a new `intro-install_plan.json`/`jq`
+    parse added to catch plain `install()`ed headers like
+    `nix-util-c`'s own `nix_api_util.h` — invisible to both earlier
+    sources since nothing `#include`s a public API header as part of
+    building itself) inside one `(...)` subshell piped into `sort -u`.
+    `stdenv`'s own `setup` script runs under `set -eu` +
+    `set -o pipefail`, so ANY command in that subshell producing zero
+    matching lines (a legitimate outcome — e.g. a small component with
+    no `../`-relative deps at all) exits nonzero and aborts the ENTIRE
+    subshell immediately, silently skipping every command listed
+    after it — which is exactly why the newest, last-listed
+    `intro-install_plan.json` block never ran for `nix-util-c`
+    specifically, even though its own `jq` logic was independently
+    verified correct via manual reproduction. Fixed by appending
+    `|| true` to every command in the subshell, making each of the
+    three carry-forward sources independently best-effort.
+
+With bugs 13-15 fixed, `try-it-out/examples/16-accelerate-nix-cli.nix`
+builds the complete `nix-cli` chain end to end: all 378 translation
+units across all 8 core components + 6 `-c` shims compile, every
+per-component link/install/fixup succeeds, and the final `nix`
+executable links successfully with all 12 conventional entry-point
+symlinks (`nix-build`, `nix-env`, `nix-store`, `nix-shell`, ...)
+present and correct. Confirmed the resulting binary actually runs
+(`nix --version` reports `2.36.0pre20260901_72385de` correctly) via a
+`bwrap`-sandboxed invocation binding the test store's `/nix` in
+read-only (a real, non-daemon `local?root=...` store's own
+`/nix/store/...`-prefixed paths can't be dereferenced directly from
+the host's real store root). All three existing regression tests
+(`mkOutputOf`, `nonTrivial`, `defaultBackend`) continue to pass.
 
 ## What's still follow-on work
 
-- The `nix-util` LTO/`pow` linking gap above: still unresolved.
-  Candidate next steps: try disabling LTO for real this time (`meson`
-  reads `-Db_lto=...` last-wins, and `packaging/components.nix`'s own
-  `preConfigure` unconditionally re-appends `-Db_lto=true` for
-  `release`/`minsize` build types AFTER any caller-supplied override,
-  so a plain `mesonFlags` addition doesn't actually take effect — an
-  `overrideAttrs` on `preConfigure` itself, or a `buildType` override,
-  would be needed to genuinely test LTO-off); or investigate whether
-  explicitly linking `-lm` in the final link unit's own record
-  resolves it, without waiting to fully explain the GCC LTO
-  partitioning difference.
 - No new eager-mode-specific Nix-level regression fixture exists yet
   for `granularity = "module"` (example 06's compiled variant is the
   only current coverage) — a dedicated `dyndrv-shim`-crate-level
   integration test (mirroring `ar-integration-test.nix`'s own pattern)
   would give tighter, faster-to-run coverage than a full example build.
+- Every one of NixOS/nix's own 14 build components now builds
+  completely through the accelerator, from `nix-util` up through the
+  final `nix` executable itself (378 translation units total). No
+  further real components remain to exercise for this particular
+  "build all of Nix" goal.
 

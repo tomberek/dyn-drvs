@@ -576,6 +576,204 @@ in
     for _dcs_p in "''${dyndrv_stubPaths[@]}"; do
       ${pkgs.coreutils}/bin/rm -f "$dyndrv_origTree/$_dcs_p"
     done
+    # meson (and similarly out-of-tree build systems) reference SOURCE-
+    # tree files/directories one level ABOVE the build dir via literal
+    # "../<path>" tokens throughout build.ninja -- both as an edge's
+    # own explicit dependency (e.g. "build libnixutil.so.2.36.0.p/
+    # archive.cc.o: cpp_COMPILER ../archive.cc") AND, just as often, as
+    # an `-I../include`-style compiler flag on that same edge's own
+    # `ARGS` line (an entire HEADER DIRECTORY, not a single file --
+    # confirmed by direct reproduction: restricting this scan to only
+    # "build ...:" lines missed every one of these, since headers
+    # reached purely via `-I` never appear as an edge's own explicit
+    # dependency at all, only implicitly via a `-MD` depfile that
+    # doesn't exist yet at THIS point). Two failure modes if either is
+    # missing: ninja's own dependency-graph LOADING step refuses to
+    # proceed at all if a referenced SOURCE file is absent (confirmed:
+    # "ninja: error: '../archive.cc', needed by 'libnixutil.so.2.36.0.p
+    # /archive.cc.o', missing and no known rule to make it"), while a
+    # missing HEADER directory instead lets ninja proceed but fails
+    # the actual compile outright ("fatal error: nix/util/archive.hh:
+    # No such file or directory") the moment anything really needs
+    # rebuilding (or, if using a build tool whose restat check doesn't
+    # already treat every real, up-to-date output as still fresh --
+    # see `phases/split.nix`'s own mtime-normalization comment -- EVEN
+    # when nothing actually needs rebuilding). `dyndrv_buildRoot`
+    # itself (== "." here, the build dir) is the only tree this script
+    # ever submits -- by design, to avoid re-shipping the WHOLE
+    # original source tree a second time -- so these specific,
+    # individually-named files/directories (still sitting right there
+    # on disk one level up, in THIS sandbox, untouched) are carried
+    # forward too, into a dedicated `.dyndrv-carried-up1/` subdir of
+    # the submitted tree (stripped of their own leading "../"), rather
+    # than a blind copy of the whole parent directory. `phases/
+    # split.nix`'s own phase 2 looks for this exact subdir to decide
+    # whether it needs to reconstruct the one-level-up nesting at all
+    # (a plain, non-meson build never produces one, so this is purely
+    # additive there).
+    if [ -f "$dyndrv_buildRoot/build.ninja" ]; then
+      dyndrv_carriedDir="$dyndrv_origTree/.dyndrv-carried-up1"
+      dyndrv_buildAbs=$(${pkgs.coreutils}/bin/realpath "$dyndrv_buildRoot")
+      while IFS= read -r _dcs_rel; do
+        [ -z "$_dcs_rel" ] && continue
+        case "$_dcs_rel" in
+          /*)
+            # An ABSOLUTE path (from `intro-install_plan.json`, see
+            # below) -- convert to the SAME relative-to-`$dyndrv_
+            # buildRoot` form the `../`-prefixed sources already use,
+            # so the single carry-forward loop below handles all three
+            # sources uniformly. `-m`/`--canonicalize-missing`: pure
+            # STRING path arithmetic, no filesystem existence check --
+            # confirmed necessary by direct reproduction: without it,
+            # `realpath --relative-to` silently failed (empty stdout,
+            # nonzero exit swallowed by this loop's own `$()`) the
+            # moment `$_dcs_rel` named a path that happens not to
+            # exist relative to the CALLER's OWN cwd (a real concern
+            # here specifically since this whole block already runs
+            # from an arbitrary, possibly-unrelated cwd during ad hoc
+            # debugging/reproduction -- inside the real sandbox this
+            # path always exists, but there's no reason to depend on
+            # that when pure string arithmetic is just as correct and
+            # strictly more robust).
+            _dcs_rel=$(${pkgs.coreutils}/bin/realpath -m --relative-to="$dyndrv_buildAbs" "$_dcs_rel")
+            ;;
+        esac
+        _dcs_srcPath="$dyndrv_buildRoot/$_dcs_rel"
+        _dcs_relNoUp="$_dcs_rel"
+        while true; do
+          case "$_dcs_relNoUp" in
+            ../*) _dcs_relNoUp="''${_dcs_relNoUp#../}" ;;
+            *) break ;;
+          esac
+        done
+        if [ -d "$_dcs_srcPath" ]; then
+          ${pkgs.coreutils}/bin/mkdir -p "$dyndrv_carriedDir/$_dcs_relNoUp"
+          ${pkgs.coreutils}/bin/cp -r "$_dcs_srcPath"/. "$dyndrv_carriedDir/$_dcs_relNoUp"/
+        elif [ -f "$_dcs_srcPath" ]; then
+          ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dyndrv_carriedDir/$_dcs_relNoUp")"
+          ${pkgs.coreutils}/bin/cp "$_dcs_srcPath" "$dyndrv_carriedDir/$_dcs_relNoUp"
+        fi
+      done < <(
+        (
+          # Every command in this subshell can LEGITIMATELY match/find
+          # NOTHING for a given component (e.g. a component with no
+          # `../`-relative source references, or no `headers`/`data`
+          # entries outside its own build dir at all) -- `grep`/`jq`
+          # both exit NONZERO when they produce zero output, and this
+          # whole block runs inside a `(...)` subshell under `set -e`
+          # (inherited from `stdenv`'s own `setup` script, confirmed by
+          # direct reading, plus `set -o pipefail` right below it) --
+          # confirmed by direct reproduction: `echo "" | grep -oE
+          # '\.\./' | grep -oE '\.\./'` exits 1, and WITHOUT `|| true`
+          # on every one of these, that nonzero exit ABORTED THIS WHOLE
+          # SUBSHELL silently the moment any ONE stage found nothing,
+          # skipping every source listed AFTER the first one to come
+          # up empty (confirmed this exact failure mode: the
+          # `intro-install_plan.json` fix below NEVER ran at all for
+          # `nix-util-c`, despite being byte-for-byte correct in
+          # isolation, because the PRECEDING `ninja -t deps` pipeline
+          # happened to match zero lines for that specific component
+          # and silently aborted everything after it). `|| true` on
+          # every stage, not just the last, makes each source
+          # independently best-effort.
+          ${pkgs.gnugrep}/bin/grep -oE '\.\./[^ $"'"'"']+' "$dyndrv_buildRoot/build.ninja" || true
+          # `ninja -t deps` (no target arg -- dumps EVERY compiled
+          # target's own already-logged deps) catches dependencies the
+          # plain `build.ninja` TEXT scan above structurally can't see
+          # at all: a C23 `#embed "schema.sql"` directive (confirmed
+          # against NixOS/nix's own `nix-store` component,
+          # `local-store.cc`'s `#embed "schema.sql"`/`#embed "ca-
+          # specific-schema.sql"`) is tracked by gcc's own `-MD`
+          # depfile exactly like an `#include`, but that tracking
+          # lands ONLY in ninja's binary `.ninja_deps` log -- it never
+          # appears as literal text in `build.ninja` itself (confirmed
+          # by direct reproduction: `grep -c schema build.ninja`
+          # returns 0 even though `ninja -t deps` correctly lists
+          # `../src/schema.sql`). Run from `$dyndrv_buildRoot` (cd'd
+          # into first, in a subshell, so this doesn't disturb the
+          # caller's own cwd) since `-t deps` reads `.ninja_deps`
+          # relative to the invoking cwd, same as any other ninja
+          # command. `2>/dev/null || true`: a target with NO tracked
+          # deps at all (e.g. a link step) prints nothing for itself,
+          # not an error, but `ninja -t deps` exits nonzero if ANY
+          # target lacks deps info -- harmless here, this is a
+          # best-effort ADDITIONAL source of `../`-paths, not the only
+          # one.
+          ( cd "$dyndrv_buildRoot" && ${pkgs.ninja}/bin/ninja -t deps 2>/dev/null || true ) \
+            | ${pkgs.gnugrep}/bin/grep -oE '^ +\.\./[^ ]+' | ${pkgs.gnugrep}/bin/grep -oE '\.\./[^ ]+' || true
+          # `meson-info/intro-install_plan.json` (machine-readable,
+          # always regenerated after `meson setup`) catches what
+          # NEITHER of the above two sources can: a plain `install()`ed
+          # header/data file is NEVER a compile-time dependency at all
+          # (nothing `#include`s it as part of ITS OWN build; it's
+          # public API surface meant for downstream consumers only),
+          # so it never appears in `build.ninja`'s own edges OR any
+          # compiler's `-MD` depfile -- confirmed by direct
+          # reproduction against NixOS/nix's own `nix-util-c`
+          # component: `nix_api_util.h` is genuinely absent from BOTH
+          # `build.ninja`'s text and `ninja -t deps`' output, yet
+          # `meson install`'s own install PLAN records its absolute
+          # source path directly (`headers: {"/build/source/src/
+          # libutil-c/nix_api_util.h": {...}}`), and fails outright
+          # ("Tried to install something that isn't a file") the
+          # moment that path doesn't exist in phase 2's tree. Every
+          # section's own top-level keys (`headers`/`data`/`man`/etc,
+          # `targets` too though those always live INSIDE the build
+          # dir already and get filtered out below) are each one
+          # absolute SOURCE path meson's own installer will read
+          # from -- filtering to just the ones OUTSIDE the build dir
+          # (a `targets`-section entry, e.g. `libnixutilc.a`, is
+          # already inside it, needing no carry-forward at all) gives
+          # exactly the missing set, with no false positives.
+          if [ -f "$dyndrv_buildRoot/meson-info/intro-install_plan.json" ]; then
+            ${pkgs.jq}/bin/jq -r --arg buildabs "$dyndrv_buildAbs" '
+              [.[] | keys[]] | map(select(startswith($buildabs) | not)) | .[]
+            ' "$dyndrv_buildRoot/meson-info/intro-install_plan.json" 2>/dev/null || true
+          fi
+        ) | sort -u
+      )
+      # meson ALSO bakes phase 1's own ABSOLUTE build-dir path into
+      # OTHER generated state beyond build.ninja itself -- confirmed by
+      # direct reproduction against nix-util's own `ninja install`:
+      # `meson-private/install.dat` (a pickled Python object,
+      # `installdata.headers[].path`) records the literal absolute
+      # source path `/build/source/src/libutil/build/include/nix/util/
+      # config.hh`, which `phases/split.nix`'s own synthetic
+      # `.dyndrv-build/` staging name does NOT match at all -- meson's
+      # own installer then finds a symlink at that exact path pointing
+      # nowhere real relative to ITS OWN understanding of where things
+      # are, and refuses to install it ("Tried to install something
+      # that isn't a file"). Rather than special-casing every ONE of
+      # these separately-baked-absolute-path files (unbounded, since
+      # any future meson version could bake another), record phase 1's
+      # OWN absolute cwd, relative to `NIX_BUILD_TOP` (always `/build`
+      # in every sandbox, phase 1's and phase 2's alike, confirmed by
+      # direct reproduction) -- so `phases/split.nix`'s own phase 2 can
+      # reconstruct that EXACT SAME absolute position instead of a
+      # synthetic one, making every one of these baked-absolute
+      # references correct "for free," with no per-file special-casing
+      # needed at all.
+      ${pkgs.coreutils}/bin/realpath --relative-to="''${NIX_BUILD_TOP:-/build}" "$dyndrv_buildRoot" \
+        > "$dyndrv_origTree/.dyndrv-build-relpath"
+      # meson's own `--prefix=$out` (baked in at CONFIGURE time, phase
+      # 1) is NEVER overridden by a fresh `$out` at install time --
+      # unlike autotools/make (`make install DESTDIR=...`), `meson
+      # install` reads NO env var for its own destination at all;
+      # `--destdir`/`$DESTDIR` is meson's own PREPEND mechanism instead
+      # (confirmed via `meson install --help`) -- installed content
+      # lands at `$DESTDIR/<baked-prefix>/...`, not `$DESTDIR/...`
+      # directly. Since phase 1's own baked prefix (its OWN `$out`, a
+      # `builder-rpc-v0`-sandboxed placeholder value never meant to be
+      # a REAL path -- see `phases/split.nix`'s own header comment) is
+      # simply unknown to phase 2 otherwise, it's recorded here, once,
+      # alongside the other meson-specific markers -- confirmed
+      # necessary by direct reproduction: without exporting `DESTDIR`
+      # in phase 2, `ninja install` wrote everything under a literal,
+      # nonsensical `$out/nix-util-2.36.0pre.drv/...` path (phase 1's
+      # own placeholder `$out`, complete with its own `.drv` suffix),
+      # never under phase 2's real `$out` at all.
+      printf '%s' "$out" > "$dyndrv_origTree/.dyndrv-phase1-out"
+    fi
     dyndrv_origTreePath=$(nix store add "$dyndrv_origTree")
     dyndrv_origTreeBasename=$(basename "$dyndrv_origTreePath")
 
