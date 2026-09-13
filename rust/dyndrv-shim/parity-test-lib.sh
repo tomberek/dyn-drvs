@@ -17,16 +17,18 @@
 #
 # Builds `shim.devShell`'s own wrapper dir against the AMBIENT store
 # (no sandbox, no alt store -- the whole point of `Rpc` mode) and
-# echoes its store path. Requires `$DYNDRV_ROOT` in scope.
+# echoes its store path. Requires `$DYNDRV_ROOT` in scope. Built via
+# `flake.nix`'s own `packages.<system>.rpc-wrapper` output (same
+# `wrapperDir`/`autoforce = false` shape this used to construct via an
+# inline `--expr` calling `builtins.getFlake` on this local checkout --
+# which always needs `--impure` once actually used, regardless of git
+# state; building it as a real flake output instead needs no `--impure`
+# at all, since `pkgs` there comes from the flake's own `packages =
+# builtins.mapAttrs (system: pkgs: ...)`).
 parity_build_devshell_wrapper() {
-  nix build --impure --no-link --print-out-paths --expr '
-    let
-      pkgs = (builtins.getFlake "'"$DYNDRV_ROOT"'").legacyPackages.${builtins.currentSystem};
-      lib = pkgs.lib;
-      self = import '"$DYNDRV_ROOT"'/nix { inherit pkgs lib; };
-      dyndrvShim = import '"$DYNDRV_ROOT"'/rust/dyndrv-shim.nix { inherit pkgs; };
-    in (self.shim.devShell { stdenv = pkgs.stdenv; inherit dyndrvShim; autoforce = false; }).wrapperDir
-  ' 2>/dev/null
+  local system
+  system=$(nix config show --json | jq -r .system.value)
+  nix build --no-link --print-out-paths "$DYNDRV_ROOT#packages.$system.rpc-wrapper" 2>/dev/null
 }
 
 # parity_run_native_build <wrapper-dir> <workdir> <src-file>...

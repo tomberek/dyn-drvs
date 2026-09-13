@@ -65,6 +65,35 @@
       packages = builtins.mapAttrs (system: pkgs: {
           example = import ./try-it-out/examples/08-accelerate-example-dir.nix { inherit pkgs; };
 
+          # The `Rpc`-mode wrapper dir `nix/lib/shim/devShell.nix`'s own
+          # `wrapperDir` produces (`bin/cc`/`c++`/`ar`/`ranlib`, backed
+          # by the compiled `rust/dyndrv-shim`) -- with `autoforce =
+          # false` (registers, never realizes), matching what every one
+          # of `rust/dyndrv-shim/{parity-test-lib,cross-mode-reuse,
+          # thunk-nix-multinode-test,drv-thunk-multinode-test}.sh`
+          # actually needs. Exposed as a real flake output rather than
+          # each script computing it independently via its own inline
+          # `nix build --expr '... builtins.getFlake "$DYNDRV_ROOT" ...'`
+          # -- `builtins.getFlake` on a local path is ALWAYS treated as
+          # an unlocked flake reference once its result is actually
+          # used (confirmed by direct reproduction: true regardless of
+          # `?rev=` or a clean git tree), so every one of those scripts
+          # needed `--impure` just to resolve `pkgs` this way. Building
+          # THIS output via `.#packages.<system>.rpc-wrapper` instead
+          # needs no `--impure` at all, since `pkgs` here is supplied
+          # by this SAME flake's own `packages = builtins.mapAttrs
+          # (system: pkgs: ...)`, exactly like every `checks.<system>.
+          # example-*` entry above.
+          rpc-wrapper =
+            let
+              dyndrvShim = import ./rust/dyndrv-shim.nix { inherit pkgs; };
+            in
+            (self.lib.${system}.shim.devShell {
+              stdenv = pkgs.stdenv;
+              inherit dyndrvShim;
+              autoforce = false;
+            }).wrapperDir;
+
           default =
             let
               patchedNix = import ./try-it-out/patched-nix.nix { inherit system; };

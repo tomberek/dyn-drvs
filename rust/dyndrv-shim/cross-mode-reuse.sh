@@ -130,14 +130,11 @@ if [[ ! -S "$PRIVATE_SOCKET" ]]; then
 fi
 
 echo "building devShell wrapper..." >&2
-WRAPPER_DIR=$(nix build --impure --no-link --print-out-paths --expr '
-  let
-    pkgs = (builtins.getFlake "'"$DYNDRV_ROOT"'").legacyPackages.${builtins.currentSystem};
-    lib = pkgs.lib;
-    self = import '"$DYNDRV_ROOT"'/nix { inherit pkgs lib; };
-    dyndrvShim = import '"$DYNDRV_ROOT"'/rust/dyndrv-shim.nix { inherit pkgs; };
-  in (self.shim.devShell { stdenv = pkgs.stdenv; inherit dyndrvShim; autoforce = false; }).wrapperDir
-' 2>/dev/null)
+# Built via `flake.nix`'s own `packages.<system>.rpc-wrapper` output --
+# see `parity-test-lib.sh`'s own matching comment for why this avoids
+# `--impure` (a real flake output, not an inline `--expr` calling
+# `builtins.getFlake` on this local checkout).
+WRAPPER_DIR=$(nix build --no-link --print-out-paths "$DYNDRV_ROOT#packages.$SYSTEM.rpc-wrapper" 2>/dev/null)
 
 echo "seeding the private store with the devShell wrapper's own closure..." >&2
 "$DYNDRV_NIX/bin/nix" copy --no-check-sigs --to "local?root=$PRIVATE_STORE" "$WRAPPER_DIR" >/dev/null 2>&1

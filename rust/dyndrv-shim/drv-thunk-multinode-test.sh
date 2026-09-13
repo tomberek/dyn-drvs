@@ -33,14 +33,12 @@ WORKDIR=$(mktemp -d -t dyndrv-drv-multinode-test.XXXXXX)
 trap 'rm -rf "$WORKDIR"' EXIT
 
 echo "building dyndrv-shim + wrapper..." >&2
-WRAPPER_DIR=$(nix build --impure --no-link --print-out-paths --expr '
-  let
-    pkgs = (builtins.getFlake "'"$DYNDRV_ROOT"'").legacyPackages.${builtins.currentSystem};
-    lib = pkgs.lib;
-    self = import '"$DYNDRV_ROOT"'/nix { inherit pkgs lib; };
-    dyndrvShim = import '"$DYNDRV_ROOT"'/rust/dyndrv-shim.nix { inherit pkgs; };
-  in (self.shim.devShell { stdenv = pkgs.stdenv; inherit dyndrvShim; }).wrapperDir
-')
+# Built via `flake.nix`'s own `packages.<system>.rpc-wrapper` output
+# (`autoforce = false` there matches this script's own unset default)
+# -- see `rust/dyndrv-shim/parity-test-lib.sh`'s matching comment for
+# why this avoids `--impure`.
+SYSTEM=$(nix config show --json | jq -r .system.value)
+WRAPPER_DIR=$(nix build --no-link --print-out-paths "$DYNDRV_ROOT#packages.$SYSTEM.rpc-wrapper")
 
 export PATH="$WRAPPER_DIR/bin:$PATH"
 export CC="$WRAPPER_DIR/bin/cc"
