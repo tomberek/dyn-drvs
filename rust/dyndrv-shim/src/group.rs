@@ -68,20 +68,13 @@ pub fn accumulate_and_register(
         .parse()
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
 
-    // Deterministic from `key` alone -- computed ONCE here and reused
-    // for both branches below, so `reparse_head`'s own re-parse always
-    // recovers the SAME name a freshly-created group derivation would
-    // have gotten, instead of some other placeholder. Confirmed
-    // necessary by direct reproduction: an EARLIER version of this
-    // function passed a fixed literal name to `parse_derivation_aterm`
-    // on re-parse, which (since a real `.drv`'s own `name` field is
-    // taken directly from the parser's `name` ARGUMENT, not read back
-    // from the ATerm bytes themselves) silently renamed the group's own
-    // derivation on every subsequent member -- confirmed via `nix
-    // derivation show`: a two-member group registered TWO differently-
-    // named derivations (`dyndrv-batch-vendor.drv` then a plain
-    // `dyndrv-batch.drv`) instead of accumulating onto the SAME logical
-    // name throughout.
+    // Deterministic from `key` alone -- computed once and reused for
+    // both branches below, so `reparse_head`'s re-parse always recovers
+    // the same name a freshly-created group derivation would have
+    // gotten, rather than silently renaming the group's derivation on
+    // each subsequent member (a real `.drv`'s `name` field comes from
+    // the parser's `name` argument, not from the ATerm bytes
+    // themselves).
     let group_name: StorePathName = format!("dyndrv-batch-{}", sanitize_key(key))
         .parse()
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;

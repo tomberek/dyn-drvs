@@ -25,7 +25,7 @@
 # full mkDynamicDerivation -> viaNixInstantiate -> outputOf pipeline, can
 # both be realized side by side without interfering with each other.
 #
-# Run with: try-it-out/run-nix.sh build --impure -f nix/tests/nonTrivial.nix
+# Run with: try-it-out/run-nix.sh build -f nix/tests/nonTrivial.nix
 # (recursive-nix backend, works with the installed system Nix -- see
 # nix/tests/run-tests.sh for the exact invocation used in CI)
 

@@ -21,7 +21,7 @@
 # produces.
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure --no-link -f try-it-out/examples/05-accelerate-stdenv.nix
+#   try-it-out/run-nix.sh build --no-link -f try-it-out/examples/05-accelerate-stdenv.nix
 #
 # `dyndrvShim ? null`: pass the compiled `rust/dyndrv-shim` package
 # (`import ../../rust/dyndrv-shim.nix { inherit pkgs; }`) to exercise the

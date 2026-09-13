@@ -1,8 +1,8 @@
 # Directly imports `patched-nix.nix` for a real derivation reference
 # (proper closure tracking) instead of threading a raw string path --
-# `builtins.storePath` was tried and confirmed NOT to carry closure
-# context earlier this session (see this crate's own history for the
-# "wrong glibc mounted" failure that caused).
+# `builtins.storePath` does not carry closure context, so import
+# patched-nix.nix directly instead of threading a raw store-path
+# string.
 let
   pkgs = (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem};
   lib = pkgs.lib;

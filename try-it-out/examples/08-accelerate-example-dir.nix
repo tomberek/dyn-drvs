@@ -13,7 +13,7 @@
 # `builder-rpc-v0`-only (phase 1's own requirement) -- run via
 # `try-it-out/run-nix.sh`, same as examples 01/03/05/06/07:
 #
-#   try-it-out/run-nix.sh build --impure --no-link --print-out-paths -f try-it-out/examples/08-accelerate-example-dir.nix
+#   try-it-out/run-nix.sh build --no-link --print-out-paths -f try-it-out/examples/08-accelerate-example-dir.nix
 #
 # Also reachable as the flake output `.#example` (`flake.nix`), same
 # underlying file, still built the same way (`run-nix.sh ... .#example`)

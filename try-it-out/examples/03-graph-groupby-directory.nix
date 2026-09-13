@@ -10,7 +10,7 @@
 # path.
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure -f try-it-out/examples/03-graph-groupby-directory.nix
+#   try-it-out/run-nix.sh build -f try-it-out/examples/03-graph-groupby-directory.nix
 #
 # Builds a (src/a) -> "a"; b (src/b, same directory as a, depends on a)
 # -> "a\nb" (merged into ONE derivation with a); c (lib/c, different

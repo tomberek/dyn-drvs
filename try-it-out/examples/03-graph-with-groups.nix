@@ -17,7 +17,7 @@
 # and therefore isn't wired into nix/tests/default.nix's flake-check path.
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure -f try-it-out/examples/03-graph-with-groups.nix
+#   try-it-out/run-nix.sh build -f try-it-out/examples/03-graph-with-groups.nix
 #
 # Builds a -> "a" (registered as part of the merged "g1" derivation's
 # own "a" output); b, sharing group "g1" with a and depending on it ->

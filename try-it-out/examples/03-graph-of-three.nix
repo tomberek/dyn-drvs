@@ -12,16 +12,15 @@
 # therefore isn't wired into nix/tests/default.nix's flake-check path.
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure -f try-it-out/examples/03-graph-of-three.nix
+#   try-it-out/run-nix.sh build -f try-it-out/examples/03-graph-of-three.nix
 #
-# Verified (2026-09-02): builds a three-node graph -- a -> "a"; b, depending
-# on a -> "a\nb"; c, depending on BOTH a and b -> "a\na\nb\nc" (c's own
-# body concatenates a's content, then b's content -- which already
-# includes a's -- then appends its own line, hence the repeated "a") --
-# and checks both `toOutput = "assemble"` (merges all three nodes' outputs
-# into one directory: $out/a, $out/b, $out/c) and `toOutput = { sink =
-# "c"; }` (returns node c's content directly, no wrapping directory)
-# resolve correctly.
+# Builds a three-node graph -- a -> "a"; b, depending on a -> "a\nb"; c,
+# depending on BOTH a and b -> "a\na\nb\nc" (c's own body concatenates a's
+# content, then b's content -- which already includes a's -- then appends
+# its own line, hence the repeated "a") -- and checks both `toOutput =
+# "assemble"` (merges all three nodes' outputs into one directory: $out/a,
+# $out/b, $out/c) and `toOutput = { sink = "c"; }` (returns node c's
+# content directly, no wrapping directory) resolve correctly.
 
 {
   pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},

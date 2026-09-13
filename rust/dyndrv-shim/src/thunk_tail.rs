@@ -85,43 +85,16 @@ fn run_drv_format(
 
 /// Realizes a real `.drv` file via `nix-store --realise`.
 ///
-/// EXPERIMENTAL FINDING (task #65, confirmed by direct reproduction):
-/// `nix-store --realise`/`nix build <path>^out` both REFUSE a `.drv`
-/// at an arbitrary filesystem path outright ("is not in the Nix
-/// store"/"is not a flake") -- Nix's builder/scheduler machinery only
-/// ever operates on an ALREADY-REGISTERED store path, never a raw
-/// on-disk file, no matter how well-formed its ATerm content is. The
-/// file must be added to the store FIRST.
-///
-/// SECOND FINDING (task #80, confirmed by direct reproduction against
-/// a real multi-node graph): `nix-store --add`'s own FLAT-CA naming
-/// produces a DIFFERENT store path than a `.drv`'s own logical
-/// `text:sha256` identity (`compute_drv_store_path`'s own computation,
-/// matching what `add_drv_to_store` registers internally) -- fine for
-/// a SINGLE, standalone `.drv` handed directly to `--realise` (nothing
-/// else references that specific path, so the mismatch is harmless),
-/// but NOT fine for a multi-node graph: a dependent's own `inputDrvs`
-/// entry references the dependency's REAL logical identity, and
-/// `--realise` fails outright ("store path '...' does not exist") if
-/// that exact path was never registered, regardless of whether SOME
-/// path with the same CONTENT exists under a different (flat-CA) name.
-/// Confirmed by direct reproduction: `nix-store --add`ing every `.drv`
-/// in a two-compile-plus-archive graph individually still left
-/// `--realise` failing on the root, since none of the resulting
-/// flat-CA paths matched what the root's own `inputDrvs` field
-/// actually names.
-///
-/// The fix: register every `.drv` (root AND every transitively-
-/// referenced dependency, walking `inputDrvs` recursively) via
-/// `add_to_store_text` -- a REAL daemon RPC call using
-/// `ContentAddressMethodAlgorithm::Text`, the SAME CA method
-/// `add_drv_to_store` uses internally, so the resulting store path
-/// matches `compute_drv_store_path`'s own computation exactly (unlike
-/// `nix-store --add`'s CLI-only Flat CA method). This still needs no
-/// `nix build`/scheduling call except the one final `--realise` on the
-/// root -- `add_to_store_text` is a plain content-addressed upload, no
-/// build involved, matching the "cheap, no build" cost this plan's own
-/// original finding already established for the single-node case.
+/// `nix-store --realise` refuses a `.drv` at an arbitrary filesystem
+/// path -- it must be registered into the store first. `nix-store --add`
+/// won't do: its flat-CA naming produces a different store path than a
+/// `.drv`'s own `text:sha256` identity (what `add_drv_to_store` and a
+/// dependent's own `inputDrvs` entry actually reference), so a
+/// multi-node graph's `--realise` fails to resolve dependencies
+/// registered that way. Instead, register every `.drv` (root and every
+/// transitively-referenced dependency) via `add_to_store_text` -- the
+/// same CA method `add_drv_to_store` uses internally -- before
+/// realizing the root.
 fn realise_drv_and_promote(
     client: &BuilderRpcClient,
     output_abs: &Path,

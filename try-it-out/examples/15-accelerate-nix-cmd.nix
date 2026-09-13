@@ -18,7 +18,7 @@
 # full rationale, not repeated here.
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure --no-link --print-out-paths -f try-it-out/examples/15-accelerate-nix-cmd.nix
+#   try-it-out/run-nix.sh build --no-link --print-out-paths -f try-it-out/examples/15-accelerate-nix-cmd.nix
 #
 # `dyndrvShim ? null`: same convention as every other example -- pass
 # the compiled `rust/dyndrv-shim` package to exercise the compiled `cc`

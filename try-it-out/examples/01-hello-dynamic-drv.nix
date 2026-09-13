@@ -3,7 +3,7 @@
 # registers one inner derivation via `nix derivation add` and hands it to
 # the outer derivation via `nix store submit-output`.
 #
-# Run with: try-it-out/run-nix.sh build --impure -f try-it-out/examples/01-hello-dynamic-drv.nix
+# Run with: try-it-out/run-nix.sh build -f try-it-out/examples/01-hello-dynamic-drv.nix
 # (no patched Nix needed -- see try-it-out/patched-nix.nix's own header
 # comment: builder-rpc-v0 is on real NixOS/nix master, run-nix.sh fetches
 # and builds it directly)

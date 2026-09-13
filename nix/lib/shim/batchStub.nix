@@ -1,9 +1,10 @@
 { pkgs, lib, self }:
 
 # Shared on-disk stub format for `shim.wrapCommand`'s `defer` mode and
-# `shim.wrapArchiver`'s collecting pass -- the marker a deferred compile's
-# wrapper writes at its expected output path instead of a real object
-# file, later read back by `wrapArchiver` to find the real compile to run.
+# `shim.collectStubs`'s whole-build-tree resolution pass -- the marker a
+# deferred compile's wrapper writes at its expected output path instead
+# of a real object file, later read back by `collectStubs` to find the
+# real compile to run.
 #
 # Mirrors nixgg's `drvref`/`batchpending` Go packages. Defined once here
 # (not hand-rolled separately in the writer and the reader) so the two
@@ -18,7 +19,7 @@
 #
 # The record file's own JSON shape is defined by the writer
 # (`wrapCommand.nix`'s `defer` branch) and consumed by the reader
-# (`wrapArchiver.nix`) -- this file only defines the outer stub.
+# (`collectStubs.nix`) -- this file only defines the outer stub.
 
 let
   header = "#!dyndrv-batch-pending";

@@ -3,8 +3,10 @@
 # dyndrv.accelerate.mkAcceleratedStdenv (see the plan's "Measuring the
 # benefit" section) -- a small, fast-to-iterate workload so this can run
 # on every PR touching nix/lib/accelerate/ or nix/lib/shim/, unlike the
-# openssl-scale benchmark (try-it-out/benchmarks/openssl-patch-rebuild.sh),
-# which is expensive and runs on a schedule instead.
+# real-package-scale benchmarks (try-it-out/benchmarks/
+# real-package-patch-rebuild.sh / real-package-version-bump.sh), which are
+# expensive and are run by hand instead (see BASELINE.md for their
+# last-measured numbers).
 #
 # Reproduces nixgg's own measurement methodology (one-line patch, N/total
 # translation units rebuilt) on a synthetic multi-file C "library"

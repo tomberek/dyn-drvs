@@ -5,9 +5,7 @@ Five minutes to your first dynamic derivation.
 ### 0. Just want to accelerate an existing package? Start here, no patched Nix needed
 
 ```console
-$ nix build --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
-    --extra-system-features recursive-nix --store 'local?root=/tmp/dyndrv-store' \
-    -f examples/05-accelerate-stdenv.nix
+$ ./run-nix.sh build --print-out-paths -f examples/05-accelerate-stdenv.nix
 ```
 
 `05-accelerate-stdenv.nix` builds a tiny 3-file C program via
@@ -72,12 +70,12 @@ This is the pairing the whole library is designed around: `builder-rpc-v0`
 is the better default when it's available, but nothing here forces an
 all-or-nothing bet on a not-yet-released Nix feature to get started.
 
-`03-graph-of-two.nix`/`03-graph-of-three.nix` and `04-wrap-command.nix`
-cover `dyndrv.graph.compile` (genuinely dependent multi-node graphs -- two
-nodes, and a three-node diamond where the final node depends on two
-upstream nodes at once) and `dyndrv.shim.wrapCommand` (the
-$PATH-command-interception primitive `mkAcceleratedStdenv` is built from)
-respectively.
+`03-graph-of-two.nix`/`03-graph-of-three.nix` cover `dyndrv.graph.compile`
+(genuinely dependent multi-node graphs -- two nodes, and a three-node
+diamond where the final node depends on two upstream nodes at once).
+`dyndrv.shim.wrapCommand`, the $PATH-command-interception primitive
+`mkAcceleratedStdenv` is built from, is demonstrated by
+`05-accelerate-stdenv.nix`/`06-accelerate-stdenv-module.nix` above.
 
 ### 3. Not sure what your Nix supports?
 

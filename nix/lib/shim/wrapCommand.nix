@@ -622,16 +622,11 @@ in
         # `nix store add`'s resulting store path/hash depends on the
         # STAGING DIRECTORY'S OWN BASENAME, not just its contents -- two
         # directories with byte-identical contents but different
-        # basenames produce two DIFFERENT store paths. Using `mktemp -d`'s
-        # randomized basename here made every invocation's staged tree
-        # (and therefore the whole registered derivation) hash
-        # differently even when nothing relevant had changed -- the root
-        # cause of a real regression where every translation unit
-        # rebuilt on a one-file patch. Fixed by staging into a FIXED
-        # basename (`dyndrv-tree`, created fresh under a `mktemp -d`
-        # PARENT so concurrent invocations still get distinct filesystem
-        # paths, but the directory `nix store add` actually hashes always
-        # has the same name).
+        # basenames produce two DIFFERENT store paths. Stage into a
+        # FIXED basename (`dyndrv-tree`) under a randomized `mktemp -d`
+        # PARENT, so concurrent invocations get distinct filesystem
+        # paths while the directory `nix store add` actually hashes
+        # always has the same name.
         # A real build routinely compiles from a directory ONE OR MORE
         # LEVELS BELOW its own source root (meson's own convention,
         # confirmed necessary by direct reproduction against NixOS/nix's

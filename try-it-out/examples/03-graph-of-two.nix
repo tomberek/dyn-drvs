@@ -10,13 +10,13 @@
 # therefore isn't wired into nix/tests/default.nix's flake-check path.
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure -f try-it-out/examples/03-graph-of-two.nix
+#   try-it-out/run-nix.sh build -f try-it-out/examples/03-graph-of-two.nix
 #
-# Verified 2026-08-31: builds a two-node graph (a -> "from a"; b, depending
-# on a, -> "from a\nand b"), and checks both `toOutput = "assemble"`
-# (merges both nodes' outputs into one directory: $out/a, $out/b) and
-# `toOutput = { sink = "b"; }` (returns node b's content directly, no
-# wrapping directory) resolve correctly.
+# Builds a two-node graph (a -> "from a"; b, depending on a, -> "from a\nand
+# b"), and checks both `toOutput = "assemble"` (merges both nodes' outputs
+# into one directory: $out/a, $out/b) and `toOutput = { sink = "b"; }`
+# (returns node b's content directly, no wrapping directory) resolve
+# correctly.
 
 {
   pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},

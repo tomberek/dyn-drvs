@@ -3,7 +3,7 @@
 `rust/dyndrv-shim` is a real, working compiled binary (two entrypoints:
 `dyndrv-shim` for per-invocation `cc`/`ar`/`ranlib` shimming,
 `dyndrv-collect` for the end-of-`buildPhase` whole-tree resolution
-pass), built via `nix/rust/dyndrv-shim.nix` (`rustPlatform.buildRustPackage`).
+pass), built via `rust/dyndrv-shim.nix` (`rustPlatform.buildRustPackage`).
 It replaces the `nix`/`jq` CLI shellouts `wrapCommand.nix`/
 `collectStubs.nix` otherwise use with a raw Nix daemon worker-protocol
 client, collapsing each shim invocation to one process.

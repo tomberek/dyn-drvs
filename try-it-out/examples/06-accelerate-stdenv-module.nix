@@ -14,7 +14,7 @@
 # `installPhase`, needs no special capability at all).
 #
 # Run with:
-#   try-it-out/run-nix.sh build --impure --no-link -f try-it-out/examples/06-accelerate-stdenv-module.nix
+#   try-it-out/run-nix.sh build --no-link -f try-it-out/examples/06-accelerate-stdenv-module.nix
 #
 # Builds a 3-file C program (main.c + vendor/lib_a.c + vendor/lib_b.c)
 # via an ordinary Makefile; the final linked binary runs and produces
