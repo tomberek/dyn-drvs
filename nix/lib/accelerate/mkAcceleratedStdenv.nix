@@ -607,7 +607,6 @@ let
       null
     else
       let
-        outputFile = if outIdx != (-1) then builtins.elemAt argv (outIdx + 1) else implicitOutputFile;
         treeBasename = builtins.getEnv "DYNDRV_TREE_BASENAME";
         # `ccShim`/`cxxShim` (below) share this IDENTICAL `toNode`
         # string -- both need the SAME discovery/deferral logic, only
@@ -945,7 +944,6 @@ let
     let
       len = builtins.length argv;
       modifiers = builtins.elemAt argv 0;
-      archivePath = builtins.elemAt argv 1;
       inputs = builtins.genList (i: builtins.elemAt argv (i + 2)) (len - 2);
       argvForAr = [ modifiers "$out" ] ++ inputs;
     in
