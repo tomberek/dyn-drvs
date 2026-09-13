@@ -12,8 +12,13 @@ SYSTEM_FEATURES="builder-rpc-v0"
 # documents: the Nix driving this build and the `nixPackage` passed
 # internally to `builder-rpc-v0` registration calls must be the SAME
 # fetched build. Resolved once here, exactly the way
-# `try-it-out/run-nix.sh` already does.
-DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths \
+# `try-it-out/run-nix.sh` already does -- including passing `system`
+# explicitly (sourced from `nix config show`, a plain config query, not
+# an eval) so this build needs no `--impure` for `patched-nix.nix`'s own
+# `system ? builtins.currentSystem` default.
+SYSTEM=$(nix config show --json | jq -r .system.value)
+DYNDRV_NIX=$(nix build --no-link --print-out-paths \
+  --argstr system "$SYSTEM" \
   -f "$DYNDRV_ROOT/patched-nix.nix" '^out')
 NIX_BIN="$DYNDRV_NIX/bin/nix"
 

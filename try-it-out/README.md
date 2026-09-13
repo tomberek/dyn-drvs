@@ -50,7 +50,7 @@ commit; override `DYNDRV_STORE` to use a different local store root.
 ### 2. Run the examples
 
 ```console
-$ ./run-nix.sh build --impure --print-out-paths -f examples/01-hello-dynamic-drv.nix
+$ ./run-nix.sh build --print-out-paths -f examples/01-hello-dynamic-drv.nix
 ```
 
 `01-hello-dynamic-drv.nix` builds a minimal dynamic derivation via the

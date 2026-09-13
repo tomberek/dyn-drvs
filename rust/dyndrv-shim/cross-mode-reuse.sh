@@ -102,7 +102,14 @@ WORKDIR=$(mktemp -d -t dyndrv-cross-mode-reuse.XXXXXX)
 trap 'rm -rf "$WORKDIR"; kill "${DAEMON_PID:-0}" 2>/dev/null || true; rm -f "$PRIVATE_SOCKET"' EXIT
 
 echo "resolving builder-rpc-v0-capable Nix..." >&2
-DYNDRV_NIX=$(nix build --impure --no-link --print-out-paths -f "$DYNDRV_ROOT/try-it-out/patched-nix.nix" '^out')
+# `system` passed explicitly (sourced from `nix config show`, a plain
+# config query, not an eval) so this build needs no `--impure` for
+# `patched-nix.nix`'s own `system ? builtins.currentSystem` default --
+# same fix `try-it-out/run-nix.sh` already applies.
+SYSTEM=$(nix config show --json | jq -r .system.value)
+DYNDRV_NIX=$(nix build --no-link --print-out-paths \
+  --argstr system "$SYSTEM" \
+  -f "$DYNDRV_ROOT/try-it-out/patched-nix.nix" '^out')
 
 echo "starting a private daemon against an isolated store..." >&2
 NIX_CONFIG='extra-experimental-features = nix-command ca-derivations dynamic-derivations recursive-nix' \

@@ -49,7 +49,7 @@ provides as a real, runnable `nix` wrapper — `nix run . --` puts it on
 `$PATH` for one command without a separate build step:
 
 ```console
-$ nix run . -- build --impure --no-link --print-out-paths .#example -Lv
+$ nix run . -- build --no-link --print-out-paths .#example -Lv
 $ nix run . -- realisation info .#example
 lyzqh0nc0xlxx34djan21h24gdisbmmk-dyndrv-example-1.0.drv^out /nix/store/...-dyndrv-example-1.0
 0ck5dldzqgsm3v1y3k5kj7lvfm7hvrpp-util.o.drv^out              /nix/store/...-util.o
@@ -174,7 +174,7 @@ IFD — see `try-it-out/examples/02-fallback-ifd.nix`, which runs on
 stock Nix with no experimental features at all.
 
 ```console
-$ ./try-it-out/run-nix.sh build --impure -f try-it-out/examples/01-hello-dynamic-drv.nix
+$ ./try-it-out/run-nix.sh build -f try-it-out/examples/01-hello-dynamic-drv.nix
 ```
 
 See `try-it-out/README.md` for the full walkthrough, and

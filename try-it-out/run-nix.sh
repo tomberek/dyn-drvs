@@ -58,7 +58,15 @@ fi
 # (confirmed necessary by direct reproduction: without `^out`, capturing
 # `$(...)` into one variable concatenated both lines into a single,
 # unusable garbled path).
-PATCHED_NIX=$(nix build --impure --no-link --print-out-paths $REV_ARG \
+#
+# `patched-nix.nix`'s own `system` param defaults to `builtins.
+# currentSystem` (impure) -- passed explicitly here instead, sourced
+# from `nix show-config`'s own `system` setting (a plain config query,
+# not an eval, so it needs no `--impure` at all) so this whole `nix
+# build` stays pure.
+SYSTEM=$(nix config show --json | jq -r .system.value)
+PATCHED_NIX=$(nix build --no-link --print-out-paths $REV_ARG \
+  --argstr system "$SYSTEM" \
   -f "$DYNDRV_ROOT/try-it-out/patched-nix.nix" '^out')
 
 mkdir -p "$DYNDRV_STORE"
