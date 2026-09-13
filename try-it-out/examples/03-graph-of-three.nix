@@ -24,14 +24,14 @@
 # resolve correctly.
 
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   lib ? pkgs.lib,
   dyndrv ? import ../../nix { inherit pkgs lib; },
   toOutputMode ? "assemble", # "assemble" | "sink"
 }:
 
 let
-  patchedNix = import ../patched-nix.nix { };
+  patchedNix = import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; };
 
   coreutilsBasename = builtins.baseNameOf "${pkgs.coreutils}";
 
@@ -42,7 +42,7 @@ let
     { ref }:
     {
       name = "dyndrv-graph-of-three-node-${text}";
-      system = builtins.currentSystem;
+      system = pkgs.stdenv.hostPlatform.system;
       builder = "/bin/sh";
       args = [
         "-c"

@@ -40,7 +40,7 @@ run_test() {
 
 run_test "mkOutputOf (oracle: eval-outputOf.sh)" "
   let
-    pkgs = import <nixpkgs> {};
+    pkgs = (builtins.getFlake \"$DYNDRV_ROOT\").legacyPackages.\${builtins.currentSystem};
     lib = pkgs.lib;
     dyndrv = import $DYNDRV_ROOT/nix { inherit pkgs lib; };
     result = import $DYNDRV_ROOT/nix/tests/mkOutputOf.nix { inherit pkgs lib dyndrv; };
@@ -59,7 +59,7 @@ run_test "mkOutputOf (oracle: eval-outputOf.sh)" "
 
 run_test "nonTrivial (oracle: non-trivial.nix, descoped to independent nodes)" "
   let
-    pkgs = import <nixpkgs> {};
+    pkgs = (builtins.getFlake \"$DYNDRV_ROOT\").legacyPackages.\${builtins.currentSystem};
     lib = pkgs.lib;
     dyndrv = import $DYNDRV_ROOT/nix { inherit pkgs lib; };
     result = import $DYNDRV_ROOT/nix/tests/nonTrivial.nix { inherit pkgs lib dyndrv; };
@@ -73,7 +73,7 @@ run_test "nonTrivial (oracle: non-trivial.nix, descoped to independent nodes)" "
 
 run_test "defaultBackend (unset backend defaults to builder-rpc-v0, not detected)" "
   let
-    pkgs = import <nixpkgs> {};
+    pkgs = (builtins.getFlake \"$DYNDRV_ROOT\").legacyPackages.\${builtins.currentSystem};
     lib = pkgs.lib;
     dyndrv = import $DYNDRV_ROOT/nix { inherit pkgs lib; };
     result = import $DYNDRV_ROOT/nix/tests/defaultBackend.nix { inherit pkgs lib dyndrv; };

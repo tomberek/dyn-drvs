@@ -12,8 +12,10 @@
 #   nix build --extra-experimental-features "nix-command dynamic-derivations ca-derivations recursive-nix" \
 #     -f try-it-out/examples/02-fallback-ifd.nix
 
+{
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
+}:
 let
-  pkgs = import <nixpkgs> { };
   lib = pkgs.lib;
   dyndrv = import ../../nix { inherit pkgs lib; };
 

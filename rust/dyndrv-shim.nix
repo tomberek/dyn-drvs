@@ -3,7 +3,7 @@
 # dependency story) into a real Nix package exposing `bin/dyndrv-shim`
 # -- what `shim.wrapCommand`'s `toNodeCompiled` param expects.
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../.)).legacyPackages.${builtins.currentSystem},
 }:
 
 pkgs.rustPlatform.buildRustPackage {

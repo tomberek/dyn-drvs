@@ -4,7 +4,7 @@
 # collector -- proving the compiled collector produces a correct,
 # resolvable final submission end to end.
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   self,
   dyndrvShim,
   nixPackage ? pkgs.nix,

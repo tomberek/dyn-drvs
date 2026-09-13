@@ -75,7 +75,7 @@ echo "building the sandboxed dyndrv.accelerate.mkAcceleratedStdenv variant of th
 # would be a test-setup artifact, not a real parity failure.
 SANDBOXED_OUT=$("$DYNDRV_ROOT/try-it-out/run-nix.sh" build --impure --no-link --print-out-paths \
   --arg src "$WORKDIR/src" --argstr variant "accelerated" \
-  --arg dyndrvShim "(import $DYNDRV_ROOT/rust/dyndrv-shim.nix { pkgs = import <nixpkgs> {}; })" \
+  --arg dyndrvShim "(import $DYNDRV_ROOT/rust/dyndrv-shim.nix {})" \
   -f "$DYNDRV_ROOT/try-it-out/benchmarks/small-lib.nix" 2>/dev/null)
 
 # THE actual parity check -- see devshell-parity-test.sh's own header

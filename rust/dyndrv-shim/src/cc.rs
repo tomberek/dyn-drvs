@@ -368,7 +368,23 @@ pub fn discover_tree(argv: &[String], real_cc: &str) -> Vec<String> {
         .args(&filtered)
         .args(["-M", "-MG"])
         .output();
-    let Ok(out) = out else {
+    // Checking `Ok(out)` alone (whether the subprocess could be
+    // SPAWNED) is not enough -- a crashed scan (nonzero exit) still
+    // returns `Ok` with empty/garbage stdout, which would otherwise
+    // silently produce ZERO discovered headers instead of the correct
+    // "discovery failed, don't trust this output" outcome (the RETURN
+    // VALUE is unchanged either way -- an empty `Vec` -- but checking
+    // `status.success()` makes that fallback intentional rather than
+    // an accident of `String::from_utf8_lossy` on empty bytes).
+    // Confirmed a REAL way this fires: `gcc-wrapper`'s own script dies
+    // outright on `NIX_STORE: unbound variable` under `set -u` when a
+    // caller exports `NIX_ENFORCE_PURITY=1` without also exporting
+    // `NIX_STORE` (a real sandboxed build always has both; an
+    // interactive devShell may not) -- see `devShell.nix`'s own
+    // `compiledEnv` header comment for the actual fix (exporting
+    // `NIX_STORE` there so the crash never happens in the first place).
+    let out = out.ok().filter(|o| o.status.success());
+    let Some(out) = out else {
         return Vec::new();
     };
     let stdout = String::from_utf8_lossy(&out.stdout);

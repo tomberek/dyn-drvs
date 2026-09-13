@@ -125,7 +125,7 @@ fi
 echo "building devShell wrapper..." >&2
 WRAPPER_DIR=$(nix build --impure --no-link --print-out-paths --expr '
   let
-    pkgs = import <nixpkgs> {};
+    pkgs = (builtins.getFlake "'"$DYNDRV_ROOT"'").legacyPackages.${builtins.currentSystem};
     lib = pkgs.lib;
     self = import '"$DYNDRV_ROOT"'/nix { inherit pkgs lib; };
     dyndrvShim = import '"$DYNDRV_ROOT"'/rust/dyndrv-shim.nix { inherit pkgs; };

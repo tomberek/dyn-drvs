@@ -19,11 +19,13 @@
 # underlying file, still built the same way (`run-nix.sh ... .#example`)
 # -- flakes don't change the `builder-rpc-v0` requirement.
 
+{
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
+}:
 let
-  pkgs = import <nixpkgs> { };
   lib = pkgs.lib;
   dyndrv = import ../../nix { inherit pkgs lib; };
-  patchedNix = import ../patched-nix.nix { };
+  patchedNix = import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; };
   dyndrvShim = import ../../rust/dyndrv-shim.nix { inherit pkgs; };
 
   # `../../example`, NOT a `pkgs.runCommand`-synthesized source tree --

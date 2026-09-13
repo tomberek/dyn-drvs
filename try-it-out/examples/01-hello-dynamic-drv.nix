@@ -8,8 +8,10 @@
 # comment: builder-rpc-v0 is on real NixOS/nix master, run-nix.sh fetches
 # and builds it directly)
 
+{
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
+}:
 let
-  pkgs = import <nixpkgs> { };
   lib = pkgs.lib;
   dyndrv = import ../../nix { inherit pkgs lib; };
 in
@@ -18,10 +20,10 @@ dyndrv.mkDynamicDerivation {
   version = "1.0";
   backend = "builder-rpc-v0";
   producer = dyndrv.builders.viaDerivationAdd {
-    nixPackage = import ../patched-nix.nix { };
+    nixPackage = import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; };
     toDrvJson = {
       name = "hello-dyn-1.0";
-      system = builtins.currentSystem;
+      system = pkgs.stdenv.hostPlatform.system;
       builder = "/bin/sh";
       args = [
         "-c"

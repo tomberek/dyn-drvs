@@ -8,119 +8,102 @@
 
   outputs =
     { self, nixpkgs, nix }:
-    let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
-      ];
-
-      forAllSystems = nixpkgs.lib.genAttrs systems;
-    in
     {
-      lib = forAllSystems (
-        system:
+
+      # Re-exports the raw `nixpkgs` input's own `legacyPackages` under
+      # `self` -- the standard flake output name for this shape, and
+      # what `try-it-out/`'s own examples/benchmarks (and `nix/tests/
+      # run-tests.sh`, `rust/dyndrv-shim/*.sh`) all resolve `pkgs` from
+      # via `(builtins.getFlake (toString ...)).legacyPackages.
+      # ${system}`, so `nix develop`/`nix build .#...` and a bare `nix
+      # build -f try-it-out/examples/....nix` always agree on which
+      # nixpkgs revision/stdenv they're using.
+      legacyPackages = nixpkgs.legacyPackages;
+
+      lib = builtins.mapAttrs (system: pkgs:
         import ./nix {
-          pkgs = nixpkgs.legacyPackages.${system};
-          lib = nixpkgs.lib;
+          inherit pkgs;
+          lib = pkgs.lib;
         }
-      );
+      ) nixpkgs.legacyPackages;
 
-      checks = forAllSystems (
-        system:
-        import ./nix/tests {
-          pkgs = nixpkgs.legacyPackages.${system};
-          lib = nixpkgs.lib;
+      # The 3 unit-style checks from `nix/tests/default.nix`, plus one
+      # entry per example this repo's own CI already builds (`example-
+      # NN[-suffix]`, matching each file's own numeric prefix) -- turns
+      # what used to be individual `run-nix.sh build -f <file>` shell
+      # lines in `.github/workflows/ci.yml` into real flake checks,
+      # buildable directly via `nix build .#checks.<system>.<name>`
+      # (confirmed working through the SAME patched-Nix + alt-store +
+      # `builder-rpc-v0` mechanism `run-nix.sh` already encapsulates).
+      # `07-accelerate-real-package.nix` returns `{ accelerated;
+      # patchOutput; }`, not a single derivation -- split into two
+      # separate checks accordingly, matching how CI already builds it
+      # via two separate attr-path invocations.
+      checks = builtins.mapAttrs (system: pkgs:
+        (import ./nix/tests {
+          inherit pkgs;
+          lib = pkgs.lib;
           dyndrv = self.lib.${system};
+        })
+        // {
+          example-01 = import ./try-it-out/examples/01-hello-dynamic-drv.nix { inherit pkgs; };
+          example-02 = import ./try-it-out/examples/02-fallback-ifd.nix { inherit pkgs; };
+          example-03-graph-of-two = import ./try-it-out/examples/03-graph-of-two.nix { inherit pkgs; };
+          example-03-graph-of-three = import ./try-it-out/examples/03-graph-of-three.nix { inherit pkgs; };
+          example-03-graph-with-groups = import ./try-it-out/examples/03-graph-with-groups.nix { inherit pkgs; };
+          example-03-graph-groupby-directory =
+            import ./try-it-out/examples/03-graph-groupby-directory.nix { inherit pkgs; };
+          example-05 = import ./try-it-out/examples/05-accelerate-stdenv.nix { inherit pkgs; };
+          example-06 = import ./try-it-out/examples/06-accelerate-stdenv-module.nix { inherit pkgs; };
+          example-07-accelerated =
+            (import ./try-it-out/examples/07-accelerate-real-package.nix { inherit pkgs; }).accelerated;
+          example-07-patch-output =
+            (import ./try-it-out/examples/07-accelerate-real-package.nix { inherit pkgs; }).patchOutput;
         }
-      );
+      ) nixpkgs.legacyPackages;
 
-      # `nix build .#example` (or `.#packages.<system>.example`): the
-      # real, checked-in `example/` C++ project, accelerated via
-      # `dyndrv.accelerate.mkAcceleratedStdenv` -- `try-it-out/examples/
-      # 08-accelerate-example-dir.nix`'s own content, unmodified (that
-      # file already resolves everything it needs via `<nixpkgs>`/
-      # relative imports, exactly like every other example in that
-      # directory; this output just makes it reachable as `.#example`
-      # too).
-      #
-      # STILL NEEDS an isolated alt store + a `builder-rpc-v0`-capable
-      # driving Nix to actually build -- the ambient system Nix daemon
-      # doesn't support it, and no `packages.<system>` wiring changes
-      # that structural requirement. Build it the same way as any other
-      # example, just pointed at this flake output instead of a
-      # `-f <file>` path:
-      #
-      #   try-it-out/run-nix.sh build --impure --no-link --print-out-paths .#example
-      packages = forAllSystems (
-        _: {
-          example = import ./try-it-out/examples/08-accelerate-example-dir.nix;
-        }
-      );
+      packages = builtins.mapAttrs (system: pkgs: {
+          example = import ./try-it-out/examples/08-accelerate-example-dir.nix { inherit pkgs; };
 
-      devShells = forAllSystems (system: {
-        # `nix develop .#nixgg` (previously `.#default`): the original
-        # nixgg-style shell, no compiled shim wrappers at all -- just a
-        # patched Nix pointed at an alt local store. Kept under its own
-        # name for anyone who still wants exactly this, unshimmed.
-        nixgg =
-          let
-            pkgs = nixpkgs.legacyPackages.${system};
-          in
-
-          pkgs.mkShellNoCC {
-            name = "nixgg-shell";
-            packages = [
-              pkgs.gnumake
-              pkgs.coreutils
-              pkgs.bash
-              nix.packages.${system}.nix
-            ];
-            shellHook = ''
-
-              : "''${NIXGG_STORE:=local?root=/tmp/dyn-drv-store}"
-              echo "nix shell: prepending patched Nix and pointing NIX_CONFIG at an alt store" >&2
-              export NIX_CONFIG="
-              extra-experimental-features = nix-command flakes impure-derivations ca-derivations dynamic-derivations configurable-impure-env
-              extra-system-features = builder-rpc-v0
-              store = ''${NIXGG_STORE}
-              "
+          default =
+            let
+              patchedNix = import ./try-it-out/patched-nix.nix { inherit system; };
+            in
+            pkgs.writeShellScriptBin "nix" ''
+              : "''${DYNDRV_STORE:=/tmp/dyndrv-store}"
+              mkdir -p "$DYNDRV_STORE"
+              exec ${patchedNix}/bin/nix \
+                --extra-experimental-features "nix-command ca-derivations dynamic-derivations recursive-nix" \
+                --extra-system-features "builder-rpc-v0" \
+                --store "local?root=$DYNDRV_STORE" \
+                "$@"
             '';
-          };
+        }
+      ) nixpkgs.legacyPackages;
 
-        # `nix develop` (default) / `nix develop .#dyndrv-shim`: a real
-        # `cc`/`ar`/`ranlib` toolchain backed by the compiled `rust/
-        # dyndrv-shim` binary (see `nix/lib/shim/devShell.nix`'s own
-        # header comment) -- registers (and, with `DYNDRV_AUTOFORCE=1`,
-        # realizes) real derivations for every compile/archive step run
-        # in this shell, over an ordinary UNRESTRICTED daemon connection
-        # (`Rpc` mode, auto-detected: no `builder-rpc-v0` sandbox env
-        # vars present outside a real sandboxed build). Verified
-        # end-to-end (compile, archive, ranlib-index, link, run) against
-        # a real two-file C program.
-        dyndrv-shim =
-          let
-            pkgs = nixpkgs.legacyPackages.${system};
-            lib = nixpkgs.lib;
-            dyndrvLib = self.lib.${system};
-            dyndrvShim = import ./rust/dyndrv-shim.nix { inherit pkgs; };
-            shim = dyndrvLib.shim.devShell {
-              stdenv = pkgs.stdenv;
-              inherit dyndrvShim;
-              autoforce = true;
+      devShells = builtins.mapAttrs (system: pkgs: {
+          dyndrv-shim =
+            let
+              lib = pkgs.lib;
+              dyndrvLib = self.lib.${system};
+              dyndrvShim = import ./rust/dyndrv-shim.nix { inherit pkgs; };
+              shim = dyndrvLib.shim.devShell {
+                stdenv = pkgs.stdenv;
+                inherit dyndrvShim;
+                autoforce = true;
+              };
+            in
+            pkgs.mkShellNoCC {
+              name = "dyndrv-shim-devshell";
+              packages = [
+                pkgs.gnumake
+                pkgs.coreutils
+              ];
+              shellHook = shim.shellHook;
             };
-          in
-          pkgs.mkShellNoCC {
-            name = "dyndrv-shim-devshell";
-            packages = [
-              pkgs.gnumake
-              pkgs.coreutils
-            ];
-            shellHook = shim.shellHook;
-          };
 
-        default = self.devShells.${system}.dyndrv-shim;
-      });
+          default = self.devShells.${system}.dyndrv-shim;
+        }
+      ) nixpkgs.legacyPackages;
     };
 }

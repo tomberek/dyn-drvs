@@ -4,7 +4,7 @@
 # context earlier this session (see this crate's own history for the
 # "wrong glibc mounted" failure that caused).
 let
-  pkgs = import <nixpkgs> { };
+  pkgs = (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem};
   lib = pkgs.lib;
   self = import ../../nix { inherit pkgs lib; };
   dyndrvShim = import ../dyndrv-shim.nix { inherit pkgs; };

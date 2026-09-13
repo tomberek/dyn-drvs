@@ -1,5 +1,98 @@
 # dyndrv
 
+## 🎉 Same source, two ways to build it
+
+`dyndrv` ships a `nix develop` shell (`nix/lib/shim/devShell.nix`) that
+shadows `cc`/`c++`/`ar`/`ranlib` on `$PATH` — so an ordinary `make` run
+inside it doesn't compile anything directly. Each invocation instead
+*registers a real Nix derivation* and hands back a symlink to it. Try
+it on the tiny checked-in `example/` project (a 2-file C++ "hello"):
+
+**Without forcing** — every compile/link step becomes a `.drv`
+symlink, not a file, registered but not yet built:
+
+```console
+$ nix develop
+[dyndrv-shim-devshell]$ cd example && make
+[dyndrv-shim-devshell]$ ls -la main.o util.o hello
+main.o -> /nix/store/8q397cjcbia53q28kmw1qbb92h3jp4j7-main.o.drv
+util.o -> /nix/store/1ncb5xzsrnss33iz43473pwbqq90bmrp-util.o.drv
+hello  -> /nix/store/v4bw10z83n1him5fhcxzavh7h214b6fm-hello.drv
+[dyndrv-shim-devshell]$ nix derivation show "$(readlink main.o)"
+# a real, complete derivation for `c++ -O2 -Wall -c main.cc -o main.o` —
+# `make` never ran a compiler; it built a graph of derivations that
+# happen to each *be* one compile/link step.
+```
+
+**With `DYNDRV_AUTOFORCE=1`** — the identical `make` run, except each
+step now realizes its `.drv` immediately and copies the output back,
+so you get ordinary files and a runnable binary, same as a normal
+build:
+
+```console
+$ nix develop
+[dyndrv-shim-devshell]$ export DYNDRV_AUTOFORCE=1
+[dyndrv-shim-devshell]$ cd example && make
+[dyndrv-shim-devshell]$ file hello
+hello: ELF 64-bit LSB pie executable, ...
+[dyndrv-shim-devshell]$ ./hello
+Hello from nixgg:3
+```
+
+**A third way** — the same sources, built as one *pure*, sandboxed
+`dyndrv.accelerate.mkAcceleratedStdenv` build (`try-it-out/examples/
+08-accelerate-example-dir.nix`), producing the exact same per-TU `.drv`s
+the devShell above registers by hand (confirmed identical via
+`rust/dyndrv-shim/devshell-parity-test.sh`). Needs a `builder-rpc-v0`-
+capable Nix pointed at an isolated store, which `packages.<system>.default`
+provides as a real, runnable `nix` wrapper — `nix run . --` puts it on
+`$PATH` for one command without a separate build step:
+
+```console
+$ nix run . -- build --impure --no-link --print-out-paths .#example -Lv
+$ nix run . -- realisation info .#example
+lyzqh0nc0xlxx34djan21h24gdisbmmk-dyndrv-example-1.0.drv^out /nix/store/...-dyndrv-example-1.0
+0ck5dldzqgsm3v1y3k5kj7lvfm7hvrpp-util.o.drv^out              /nix/store/...-util.o
+crx682ihlbn92522d0r1kg3gwnr9bc76-main.o.drv^out              /nix/store/...-main.o
+w2xlva4155z9x43xqg1vckwkb0z6vaik-hello.drv^out                /nix/store/...-hello
+```
+
+`realisation info` (an alias for `nix store build-trace`) walks the
+FULL dynamic-derivation resolution chain and prints every `.drv^out ->
+resolved-path` pair — the per-TU `main.o.drv`/`util.o.drv` are right
+there alongside the outer package, no build-log scraping needed.
+
+**These two `.drv` basenames — `crx682ihlbn92522d0r1kg3gwnr9bc76` for
+`main.o` and `0ck5dldzqgsm3v1y3k5kj7lvfm7hvrpp` for `util.o` — are
+BYTE-IDENTICAL to what the native devShell registers** for the same
+`main.cc`/`util.cc`, confirmed directly:
+
+| | devShell (native, no forcing) | pure sandboxed build |
+|---|---|---|
+| `main.o.drv` | `crx682ihlbn92522d0r1kg3gwnr9bc76` | `crx682ihlbn92522d0r1kg3gwnr9bc76` |
+| `util.o.drv` | `0ck5dldzqgsm3v1y3k5kj7lvfm7hvrpp` | `0ck5dldzqgsm3v1y3k5kj7lvfm7hvrpp` |
+
+Same tool, same flags, same source, same hardening/purity env — one
+path just runs `make` by hand, the other runs a real sandboxed
+`stdenv.mkDerivation` build with every compile step deferred, and Nix
+resolves both to the SAME store paths. This is exactly what
+`rust/dyndrv-shim/devshell-parity-test.sh` (`cross-mode-reuse.sh` for
+the stronger "real substitution, not just matching hashes" version)
+checks on every CI run — see `docs/rust-status.md` for the two real
+bugs closing this gap surfaced (a missing `NIX_STORE` export crashing
+header discovery, and `discover_tree`'s own silent failure on that
+crash).
+
+That mechanism scales further than toy examples: every one of
+NixOS/nix's own 14 build components — `nix-util` up through the final
+`nix` executable itself, 378 translation units total — now builds
+completely through `dyndrv.accelerate.mkAcceleratedStdenv` too. See
+`try-it-out/examples/09-accelerate-nix-util.nix` through
+`16-accelerate-nix-cli.nix` for that chain, and `docs/rust-status.md`
+for the real bugs it surfaced along the way.
+
+---
+
 A shared library and tooling for Nix's **dynamic derivations** feature —
 making it easier to build fine-grained, per-unit incremental caching (per
 Maven artifact, per C/C++ translation unit, per Haskell module, per Go

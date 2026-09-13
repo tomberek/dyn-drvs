@@ -30,13 +30,13 @@
 # call happens for the merged pair.
 
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   lib ? pkgs.lib,
   dyndrv ? import ../../nix { inherit pkgs lib; },
 }:
 
 let
-  patchedNix = import ../patched-nix.nix { };
+  patchedNix = import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; };
   coreutilsBasename = builtins.baseNameOf "${pkgs.coreutils}";
 
   mkNode =
@@ -44,7 +44,7 @@ let
     { ref }:
     {
       name = "dyndrv-graph-with-groups-node-${text}";
-      system = builtins.currentSystem;
+      system = pkgs.stdenv.hostPlatform.system;
       builder = "/bin/sh";
       args = [
         "-c"

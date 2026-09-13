@@ -472,7 +472,7 @@ in
         _dcs_srcsJson=$(printf '%s\n' "$_dcs_theseSrcs" | ${pkgs.jq}/bin/jq -R -s 'split("\n") | map(select(. != "")) | unique')
         _dcs_drvJson=$(${pkgs.jq}/bin/jq -nc \
           --arg name "dyndrv-''${DYNDRV_OUTPUT_NAME[$_dcs_p]}" \
-          --arg system "${builtins.currentSystem}" \
+          --arg system "${pkgs.stdenv.hostPlatform.system}" \
           --arg script "$_dcs_setupCmd $_dcs_cmdLine" \
           --argjson srcs "$_dcs_srcsJson" \
           '{
@@ -502,7 +502,7 @@ in
         rm -f "$_dcs_outNamesFile"
         _dcs_drvJson=$(${pkgs.jq}/bin/jq -nc \
           --arg name "dyndrv-batch-$_dcs_u" \
-          --arg system "${builtins.currentSystem}" \
+          --arg system "${pkgs.stdenv.hostPlatform.system}" \
           --arg script "$_dcs_cmd" \
           --argjson env "$_dcs_envJson" \
           --argjson srcs "$_dcs_srcsJson" \
@@ -784,7 +784,7 @@ in
 
     _dcs_finalDrvJson=$(${pkgs.jq}/bin/jq -nc \
       --arg name ${lib.escapeShellArg name} \
-      --arg system "${builtins.currentSystem}" \
+      --arg system "${pkgs.stdenv.hostPlatform.system}" \
       --arg script "$_dcs_finalCopyLines" \
       --arg src "$dyndrv_origTreeBasename" \
       --arg coreutilsSrc ${lib.escapeShellArg (builtins.baseNameOf "${pkgs.coreutils}")} \

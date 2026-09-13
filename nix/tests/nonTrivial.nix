@@ -40,7 +40,7 @@ let
       expr = ''
         derivation {
           name = "dyndrv-test-node-a-1.0";
-          system = builtins.currentSystem;
+          system = pkgs.stdenv.hostPlatform.system;
           builder = "/bin/sh";
           args = [ "-c" "echo 'from node a' > $out" ];
         }
@@ -56,7 +56,7 @@ let
       expr = ''
         derivation {
           name = "dyndrv-test-node-c-1.0";
-          system = builtins.currentSystem;
+          system = pkgs.stdenv.hostPlatform.system;
           builder = "/bin/sh";
           args = [ "-c" "echo 'from node c' > $out" ];
         }

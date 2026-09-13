@@ -26,7 +26,7 @@ let
           nixPackage = pkgs.nix;
           toDrvJson = {
             name = "dyndrv-default-backend-probe-1.0";
-            system = builtins.currentSystem;
+            system = pkgs.stdenv.hostPlatform.system;
             builder = "/bin/sh";
             args = [
               "-c"

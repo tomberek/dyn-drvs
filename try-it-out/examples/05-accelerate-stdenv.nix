@@ -31,7 +31,7 @@
 # different example.
 
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   lib ? pkgs.lib,
   dyndrv ? import ../../nix { inherit pkgs lib; },
   # `mkAcceleratedStdenv`'s own `nixPackage` version-matching requirement
@@ -41,7 +41,7 @@
   # `pkgs.nix` here fails with "Operation 19 not allowed inside
   # derivation" (`SetOptions`, rejected by the newer daemon's stricter
   # `builder-rpc-v0` connection allowlist).
-  nixPackage ? import ../patched-nix.nix { },
+  nixPackage ? import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; },
   dyndrvShim ? null,
 }:
 

@@ -39,34 +39,25 @@ jobs:
       - name: Run nix/tests/run-tests.sh
         run: nix/tests/run-tests.sh
 
-      - name: Run examples 01/02/03-graph-of-two/03-graph-of-three/03-graph-with-groups/03-graph-groupby-directory
+      # Each of these is a real `checks.<system>.<name>` flake output
+      # (`flake.nix`) -- what used to be individual `run-nix.sh build -f
+      # <file>` shell lines are now `nix build .#checks.x86_64-linux.
+      # <name>` targets, built through the SAME `run-nix.sh` wrapper
+      # (patched Nix + isolated alt store + `builder-rpc-v0`/dynamic-
+      # derivations feature flags), just pointed at a flake attr path
+      # instead of `-f <file>`. `example-02` doesn't strictly need
+      # `run-nix.sh`'s own `builder-rpc-v0` wrapping (it's designed to
+      # work on stock Nix), but running it through the same loop is
+      # harmless and keeps this step uniform.
+      - name: Run example checks (01/02/03-graph-*/05/06/07)
         run: |
-          nix build --extra-experimental-features "nix-command" \
-            --no-link -f try-it-out/examples/02-fallback-ifd.nix
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/01-hello-dynamic-drv.nix
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/03-graph-of-two.nix
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/03-graph-of-three.nix
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/03-graph-with-groups.nix
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/03-graph-groupby-directory.nix
-
-      - name: Run examples 05/06 (accelerate.mkAcceleratedStdenv, builder-rpc-v0)
-        run: |
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/05-accelerate-stdenv.nix
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/06-accelerate-stdenv-module.nix
-
-      - name: Run example 07 (accelerate.mkAcceleratedStdenv against real nixpkgs freetype)
-        run: |
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/07-accelerate-real-package.nix accelerated
-          ./try-it-out/run-nix.sh build --impure --no-link \
-            -f try-it-out/examples/07-accelerate-real-package.nix patchOutput
+          for check in example-01 example-02 example-03-graph-of-two \
+            example-03-graph-of-three example-03-graph-with-groups \
+            example-03-graph-groupby-directory example-05 example-06 \
+            example-07-accelerated example-07-patch-output; do
+            ./try-it-out/run-nix.sh build --impure --no-link \
+              --print-out-paths ".#checks.x86_64-linux.$check"
+          done
 
       - name: small-lib-patch-rebuild.sh regression check
         run: ./try-it-out/benchmarks/small-lib-patch-rebuild.sh 10 300

@@ -67,12 +67,12 @@
 # path.
 
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   lib ? pkgs.lib,
   dyndrv ? import ../../nix { inherit pkgs lib; },
   # See 05-accelerate-stdenv.nix's own comment on this -- must match
   # the Nix `try-it-out/run-nix.sh` uses to drive this build.
-  nixPackage ? import ../patched-nix.nix { },
+  nixPackage ? import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; },
   dyndrvShim ? null,
   # The real NixOS/nix source to build FROM -- same pinned rev
   # `patched-nix.nix` already uses, so this stays internally consistent

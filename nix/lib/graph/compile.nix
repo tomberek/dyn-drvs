@@ -228,7 +228,7 @@ let
           in
           builtins.toJSON {
             name = "dyndrv-group-${unitKey}";
-            system = builtins.currentSystem;
+            system = pkgs.stdenv.hostPlatform.system;
             builder = "/bin/sh";
             args = [
               "-c"
@@ -288,7 +288,7 @@ let
       externalRefs = lib.unique (if needsAssemblerNode then map refOf order else [ (refOf sinkName) ]);
       drvJson = builtins.toJSON {
         inherit name;
-        system = builtins.currentSystem;
+        system = pkgs.stdenv.hostPlatform.system;
         builder = "/bin/sh";
         args = [
           "-c"

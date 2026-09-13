@@ -10,7 +10,7 @@
 # (unmodified) -- proving the compiled shim's on-disk stub/record
 # format is byte-compatible with the proven-correct bash collector.
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   self,
   dyndrvShim,
   nixPackage ? pkgs.nix,

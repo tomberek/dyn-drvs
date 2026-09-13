@@ -1117,6 +1117,115 @@ read-only (a real, non-daemon `local?root=...` store's own
 the host's real store root). All three existing regression tests
 (`mkOutputOf`, `nonTrivial`, `defaultBackend`) continue to pass.
 
+## Flake-pinned nixpkgs threaded through try-it-out; two more real bugs found
+
+`flake.nix`'s own `nixpkgs.follows = "nix/nixpkgs"` pins nixpkgs for
+`nix develop`/`nix build .#...`, but every `try-it-out/examples/`,
+`try-it-out/benchmarks/`, and `rust/dyndrv-shim/` fixture defaulted
+`pkgs ? import <nixpkgs> { }` — an IMPURE lookup resolved via
+`$NIX_PATH`, independent of the flake's own locked input. On a machine
+whose `$NIX_PATH` points at a different nixpkgs (e.g. an internal
+fork), `nix develop` and a bare `nix build -f try-it-out/examples/....
+nix` could silently resolve to two DIFFERENT `stdenv`s — surfaced by
+`rust/dyndrv-shim/devshell-parity-test.sh` failing on exactly such a
+machine. Fixed by restructuring `flake.nix`'s own `forAllSystems` to
+compute `pkgs` once per system and expose it as a new `legacyPackages`
+output (`builtins.mapAttrs`/`genAttrs`-based, replacing the old
+per-block `nixpkgs.legacyPackages.${system}` re-derivation), then
+changing every fixture's own default to
+`pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem}`
+(depth adjusted per file's own location) — purely a DEFAULT change, so
+every existing `nix build -f ...`/`run-nix.sh` invocation keeps working
+unchanged, just now resolving the SAME nixpkgs `nix develop` does.
+
+Verifying this fix (via `devshell-parity-test.sh`, the actual
+regression it targets) surfaced two MORE real, previously-undetected
+bugs, both in how `nix/lib/shim/devShell.nix`'s `Rpc`-mode shell
+differs from a genuine sandboxed `stdenv.mkDerivation` build's own
+environment:
+
+16. **`devShell.nix` never exported `NIX_HARDENING_ENABLE`/
+    `NIX_ENFORCE_PURITY`/`NIX_ENFORCE_NO_NATIVE`**: a real sandboxed
+    build sources `stdenv.cc`'s own setup-hook (`gcc-wrapper`'s
+    `nix-support/setup-hook`, `: ${NIX_HARDENING_ENABLE=...}`)
+    automatically as part of ordinary `nativeBuildInputs` processing —
+    `pkgs.mkShellNoCC` never does, and neither does
+    `devshell-parity-test.sh`'s own bare `PATH`/`CC`/`CXX`/`AR`/
+    `RANLIB`/`DYNDRV_MODE` subshell (confirmed by direct reading: no
+    `shellHook`/`nix develop` env-sourcing runs there at all before
+    `make`) — so `cc.rs`'s own `capture_wrapper_env` (which reads its
+    OWN process environment, not a static default) genuinely saw these
+    vars unset, producing a DIFFERENT registered `.drv` for an
+    otherwise-identical compile (confirmed: `main.o.drv`'s own hash
+    differed by exactly this, even AFTER the nixpkgs-pinning fix above
+    made `stdenv`/`gcc-wrapper` themselves match). Fixed by baking
+    `NIX_HARDENING_ENABLE = stdenv.cc.default_hardening_flags_str`
+    (sourced from the real toolchain, not a hand-copied literal) plus
+    the two always-on `NIX_ENFORCE_*="1"` defaults directly into
+    `mkCompiledShim`'s own `compiledEnv` in `devShell.nix` — a static,
+    eval-time value baked into the wrapper SCRIPT's own text, correct
+    regardless of whatever environment actually invokes it (unlike a
+    `shellHook` export, which only helps callers that actually source
+    it).
+17. **`NIX_CFLAGS_COMPILE`'s `-frandom-seed=...` and `NIX_LDFLAGS`'s
+    `-rpath .../lib`, actually fixed after all**: both derive from the
+    literal TEXT of `$out` at build time
+    (`reproducible-builds.sh`'s own `randSeed=${NIX_OUTPATH_USED_AS_
+    RANDOM_SEED:-$out}`) — inside a real sandboxed `phases.split`
+    build, `$out` is that file's own FIXED placeholder STRING
+    (`dyndrvPlaceholderOut = "/build/dyndrv-placeholder-out"`, a plain
+    Nix `let` binding, not something computed by the CA/dynamic-
+    derivations machinery itself). An earlier attempt at this fix
+    wrongly assumed reproducing it needed a REAL CA derivation build
+    (confirmed by direct reproduction that overriding `out` on an
+    ordinary derivation and entering `nix develop` silently has NO
+    EFFECT — `nix develop`/`nix-shell`'s own special-casing always
+    substitutes a local `outputs/$outputName` path for `$out`,
+    regardless of what the derivation declares) — but the two derived
+    STRINGS themselves (`dyndrv-pla`, the placeholder's own basename
+    truncated to 10 chars; `-rpath /build/dyndrv-placeholder-out/lib `)
+    are ordinary, fully static text, confirmed byte-for-byte via direct
+    `nix derivation show` comparison against a real sandboxed build.
+    Fixed by hardcoding both literal strings directly into
+    `devShell.nix`'s own `compiledEnv`, cross-referenced in a comment
+    to `phases/split.nix`'s own `dyndrvPlaceholderOut` binding as the
+    source of truth to keep in sync if it ever changes.
+18. **A separate, previously-undetected bug this surfaced: `discover_tree`
+    (`cc.rs`) silently swallowed a CRASHED header-discovery scan as "no
+    extra headers found"**: adding `NIX_ENFORCE_PURITY = "1"` (bug 16
+    above) without ALSO exporting `NIX_STORE` crashes `gcc-wrapper`'s
+    own script outright under `set -u` (`"$NIX_STORE"` is checked
+    UNGUARDED once `NIX_ENFORCE_PURITY=1`, with no `:-` default) — a
+    real sandboxed build always has `NIX_STORE` ambient, but this
+    devShell's own environment did not. `discover_tree`'s own error
+    handling checked only whether the `cc -M -MG` subprocess could be
+    SPAWNED (`Ok(out)`), not whether it actually SUCCEEDED
+    (`out.status.success()`) — so the crash still returned `Ok` with
+    empty stdout, silently producing ZERO discovered headers instead of
+    a visible failure. Confirmed by direct reproduction: `main.cc`'s
+    own `#include "util.h"` vanished from the staged `dyndrv-tree`
+    entirely the moment `NIX_ENFORCE_PURITY` was added without
+    `NIX_STORE`, producing a `.drv` silently missing real header
+    content (and, as a downstream consequence, hashing differently
+    from the sandboxed side's own correctly-staged tree — this is what
+    made bug 17's fix APPEAR incomplete at first, when it was actually
+    this second, independent bug). Fixed two ways: (a) `devShell.nix`
+    now also exports `NIX_STORE = builtins.storeDir`, so the crash
+    never happens; (b) `discover_tree` itself now checks
+    `out.status.success()` before trusting `stdout`, so a future crash
+    of this kind fails safely (empty `Vec`, matching the existing
+    fallback) rather than silently succeeding with wrong content.
+
+With ALL of bugs 16-18 fixed, `devshell-parity-test.sh` and
+`devshell-parity-smalllib-test.sh` both now PASS end to end: the
+`Rpc`-mode devShell and the sandboxed `mkAcceleratedStdenv` build
+register genuinely BYTE-IDENTICAL derivations (`main.o.drv`,
+`util.o.drv`, and the small-lib fixture's own 6 TUs) for the identical
+real compile, confirmed via direct `nix derivation show` diff showing
+zero remaining differences. `cross-mode-reuse.sh` (the strongest form
+of this property — real substitution against a shared store, not just
+matching hashes) also continues to pass.
+
 ## What's still follow-on work
 
 - No new eager-mode-specific Nix-level regression fixture exists yet
@@ -1129,4 +1238,10 @@ the host's real store root). All three existing regression tests
   final `nix` executable itself (378 translation units total). No
   further real components remain to exercise for this particular
   "build all of Nix" goal.
+- The `devShell.nix` ↔ sandboxed-build environment-parity gap
+  (`NIX_HARDENING_ENABLE`, `NIX_CFLAGS_COMPILE`, `NIX_LDFLAGS`,
+  `NIX_ENFORCE_*`, `NIX_STORE`) is now fully closed — no known
+  remaining differences between the two registration paths for an
+  ordinary C/C++ compile.
+
 

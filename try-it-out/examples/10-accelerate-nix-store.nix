@@ -47,12 +47,12 @@
 # path.
 
 {
-  pkgs ? import <nixpkgs> { },
+  pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem},
   lib ? pkgs.lib,
   dyndrv ? import ../../nix { inherit pkgs lib; },
   # See 05-accelerate-stdenv.nix's own comment on this -- must match
   # the Nix `try-it-out/run-nix.sh` uses to drive this build.
-  nixPackage ? import ../patched-nix.nix { },
+  nixPackage ? import ../patched-nix.nix { system = pkgs.stdenv.hostPlatform.system; },
   dyndrvShim ? null,
   # Same pinned rev example 09 uses -- nix-store at this commit is a
   # direct dependent of nix-util at the SAME commit, so pinning both

@@ -1,4 +1,4 @@
-{ pkgs ? import <nixpkgs> { }
+{ pkgs ? (builtins.getFlake (toString ../..)).legacyPackages.${builtins.currentSystem}
 , lib ? pkgs.lib
 , dyndrv ? import ../../nix { inherit pkgs lib; }
 , src
