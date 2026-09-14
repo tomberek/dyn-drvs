@@ -99,19 +99,20 @@ jobs:
       # `run-nix.sh`'s own `builder-rpc-v0` wrapping (it's designed to
       # work on stock Nix), but running it through the same loop is
       # harmless and keeps this step uniform. `example-17`/`-18`/`-19`/
-      # `-20`/`-21`/`-22` are the regression fixtures for the cwd-
+      # `-20`/`-21`/`-22`/`-23` are the regression fixtures for the cwd-
       # relative-path-frame mismatch, CMake compiler-flag-probe
       # passthrough, `autoreconfHook` phase-dropping, `finalAttrs.
-      # finalPackage`, compile+link-in-one-step header discovery, and
-      # `-MT`/`-MF` argv-shape misclassification, respectively -- see
-      # each fixture's own header comment.
-      - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20/21/22)
+      # finalPackage`, compile+link-in-one-step header discovery,
+      # `-MT`/`-MF` argv-shape misclassification, and `ar`/`ranlib`
+      # probe-invocation crashes, respectively -- see each fixture's own
+      # header comment.
+      - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20/21/22/23)
         run: |
           for check in example-01 example-02 example-03-graph-of-two \
             example-03-graph-of-three example-03-graph-with-groups \
             example-03-graph-groupby-directory example-05 example-06 \
             example-07-accelerated example-07-patch-output \
-            example-17 example-18 example-19 example-20 example-21 example-22; do
+            example-17 example-18 example-19 example-20 example-21 example-22 example-23; do
             ./try-it-out/run-nix.sh build --impure --no-link \
               --print-out-paths ".#checks.x86_64-linux.$check"
           done

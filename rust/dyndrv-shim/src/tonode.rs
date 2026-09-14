@@ -60,13 +60,23 @@ fn extra_store_paths(argv: &[String]) -> Vec<String> {
 
 /// Port of `arToNode` (`mkAcceleratedStdenv.nix`). `ar`'s argv shape is
 /// fixed: token 0 is the modifiers string, token 1 the archive path,
-/// everything after is a positional object-file input. ALWAYS defers --
-/// no passthrough case (see that file's own header comment).
+/// everything after is a positional object-file input.
 ///
 /// `cwd`: this invocation's own cwd, relative to `NIX_BUILD_TOP` (see
 /// `wrapper::invocation_cwd`'s own doc comment) -- `""`/`"."` for the
 /// common case (invocation cwd IS the package build root).
 pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str, cwd: &str) -> Decision {
+    // PASSTHROUGH for a diagnostic/version probe -- see `mkAccelerated
+    // Stdenv.nix`'s own matching `arToNode`/`isProbe` comment for the
+    // full rationale. `ar`'s own real argv shape ALWAYS has at least 2
+    // elements; a 1-arg probe (`ar --version`) previously PANICKED here
+    // (`argv[0]`/`argv[2..]` out-of-bounds on a 1-element slice) --
+    // confirmed necessary by direct reproduction against real meson
+    // (dav1d), which runs `ar --version` unconditionally during every
+    // native build's `configurePhase`.
+    if argv.len() < 2 || argv[0].starts_with('-') {
+        return Decision::Passthrough;
+    }
     let modifiers = argv[0].clone();
     let mut args_for_ar = vec![modifiers, "$out".to_string()];
     args_for_ar.extend(argv[2..].iter().cloned());
@@ -133,6 +143,16 @@ pub fn ranlib_to_node(
     coreutils_basename: &str,
     cwd: &str,
 ) -> Decision {
+    // PASSTHROUGH for a diagnostic/version probe -- see `ar_to_node`'s
+    // own matching comment for the full rationale. Unlike `ar`'s
+    // version, an empty/probe-only argv here doesn't panic (`argv.len()
+    // - 1` on a real, non-empty argv is always in-bounds) -- it would
+    // silently MISCLASSIFY the probe's own flag as "the archive path"
+    // and defer it. A real "index this archive" invocation always has
+    // at least one non-flag positional arg.
+    if !argv.iter().any(|a| !a.starts_with('-')) {
+        return Decision::Passthrough;
+    }
     let archive_idx = argv.len() - 1;
     let real_archive_path = argv[archive_idx].clone();
     let mut args_for_ranlib = argv.to_vec();

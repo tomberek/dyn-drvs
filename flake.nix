@@ -73,6 +73,7 @@
           example-20 = import ./try-it-out/examples/20-accelerate-final-package.nix { inherit pkgs; };
           example-21 = import ./try-it-out/examples/21-accelerate-compile-and-link-one-step.nix { inherit pkgs; };
           example-22 = import ./try-it-out/examples/22-accelerate-mt-mf-absolute-source.nix { inherit pkgs; };
+          example-23 = import ./try-it-out/examples/23-accelerate-ar-ranlib-probe.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

@@ -1062,6 +1062,20 @@ let
     argv:
     let
       len = builtins.length argv;
+      hasPrefix = prefix: str:
+        builtins.substring 0 (builtins.stringLength prefix) str == prefix;
+      # PASSTHROUGH for a diagnostic/version probe -- `ar`'s own real
+      # argv shape ALWAYS has at least 2 elements (a modifiers string,
+      # then the archive path), so any invocation with fewer than 2
+      # positional args, or whose first token is a `-`-prefixed flag
+      # (e.g. `--version`, `--help`), is never a real archive operation.
+      # Confirmed necessary by direct reproduction against real meson
+      # (dav1d): meson's own linker-detection probe runs `ar --version`
+      # UNCONDITIONALLY as part of every native build's `configurePhase`
+      # -- before this check, `len - 2` went negative for that 1-element
+      # argv, and `builtins.genList` threw outright ("cannot create list
+      # of size -1") rather than either passing through or deferring.
+      isProbe = len < 2 || hasPrefix "-" (builtins.elemAt argv 0);
       modifiers = builtins.elemAt argv 0;
       inputs = builtins.genList (i: builtins.elemAt argv (i + 2)) (len - 2);
       argvForAr = [ modifiers "$out" ] ++ inputs;
@@ -1072,6 +1086,9 @@ let
       invocationCwd =
         let v = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in if v == "" || v == "." then "" else v;
     in
+    if isProbe then
+      null
+    else
     {
       defer = {
         record = builtins.toJSON (
@@ -1162,6 +1179,19 @@ let
     argv:
     let
       len = builtins.length argv;
+      hasPrefix = prefix: str:
+        builtins.substring 0 (builtins.stringLength prefix) str == prefix;
+      # PASSTHROUGH for a diagnostic/version probe -- see `arToNode`'s
+      # own matching comment for the full rationale (same class of bug:
+      # `ranlib --version`/`--help` has no real archive positional arg
+      # at all). Unlike `ar`'s version, this doesn't crash outright
+      # (`len - 1` never goes negative for `len >= 1`) -- it silently
+      # MISCLASSIFIES the probe's own flag as "the archive path" and
+      # defers it, producing a bogus stub instead of running the real
+      # probe. A real "index this archive" invocation always has AT
+      # LEAST ONE non-flag positional arg (the archive path itself);
+      # a probe has none at all.
+      isProbe = !(builtins.any (a: !(hasPrefix "-" a)) argv);
       # `ranlib`'s only positional argument (the LAST one, tolerating
       # any leading flags like `-D`) is both its input AND its own
       # output -- it indexes an archive in place, it doesn't produce a
@@ -1176,6 +1206,9 @@ let
       invocationCwd =
         let v = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in if v == "" || v == "." then "" else v;
     in
+    if isProbe then
+      null
+    else
     {
       defer = {
         record = builtins.toJSON (
