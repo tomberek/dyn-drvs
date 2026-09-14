@@ -383,27 +383,99 @@ let
   '';
   dyndrvMultioutSplitScript = ''
     # Everything landed under the single `$out` root, since phase 1
-    # (where these paths were baked in) only ever had ONE output --
-    # for a real multi-output package, nixpkgs' own `_multioutDevs`/
-    # `_multioutDocs` (declared by `multiple-outputs.sh`,
-    # unconditionally sourced by stdenv, so always available as plain
-    # bash functions here regardless of whether THIS package opted
-    # into multiple outputs) must run NOW, before anything else, to
-    # redistribute `$out`'s content across the real outputs --
-    # confirmed necessary by direct reproduction against real
-    # freetype: leaving this to the ORDINARY `preFixupHooks` array
-    # (which already contains these same functions) is NOT reliable,
-    # since a caller's OWN `nativeBuildInputs` can register another
-    # `preFixupHooks` entry (freetype's own `flatten-include-hack-
-    # hook`) that happens to run first and expects `$dev/include` to
-    # already exist -- confirmed this exact ordering failure by direct
-    # reproduction ("cd: .../include: No such file or directory").
-    # Calling these explicitly here, unconditionally, makes the split
-    # happen deterministically before ANY other `preFixupHook` gets a
-    # chance to run, matching what an ordinary (non-accelerated)
-    # build's own install-time behavior already guaranteed for free.
-    # Both are no-ops (their own top-line `getAllOutputNames`/`-z`
-    # checks) when `outputs` is just `"out"`.
+    # (where these paths were baked in) only ever had ONE output.
+    #
+    # `_multioutConfig` (the setup hook that would normally have kept
+    # `bin`/`lib`/`libexec`/`share/locale` OUT of `$out` in the first
+    # place, via `--bindir=$bin/bin`/`--libdir=$lib/lib`/etc
+    # `configureFlags`) never fired usefully in phase 1 either -- every
+    # output variable it reads (`$bin`, `$lib`, ...) was ALSO forced to
+    # `$out` there (phase 1's own forced `outputs = [ "out" ]`), so
+    # even a multi-output package's real build output landed entirely
+    # under `$out/bin`, `$out/lib`, etc, never under the real per-
+    # output paths at all. Neither `_multioutDocs` nor `_multioutDevs`
+    # (nixpkgs' own multi-output redistribution functions, called
+    # below) knows how to redistribute ORDINARY library/binary content
+    # -- both only ever move DOC/DEV-shaped subpaths (`share/doc`,
+    # `include`, `lib/pkgconfig`, ...), confirmed by direct reading of
+    # `multiple-outputs.sh` itself. Confirmed necessary by direct
+    # reproduction against real nixpkgs x264 (`outputs = [ "out" "dev"
+    # "lib" ]`): without this, `$lib` was never created at all --
+    # Nix's own builder failed outright ("failed to produce output
+    # path for output 'lib'") -- even though the real `libx264.so.165`
+    # had already been built and installed correctly, just under the
+    # wrong (`$out`) root.
+    #
+    # `moveToOutput` (declared by the SAME `multiple-outputs.sh`) is
+    # the WRONG primitive here -- it scans EVERY declared output
+    # looking for the named subpath, not just `$out` -- confirmed by
+    # direct reproduction against real freetype: its own `postInstall`
+    # already writes `bin/freetype-config` directly into the real
+    # `$dev` output (NOT `$out`), and `moveToOutput bin "$` + `{!outputBin}"`
+    # (`outputBin` resolves to `"out"` for freetype, since it never
+    # overrides it) found that `$dev/bin` content, decided `$dev !=
+    # $out` ("wrong output"), and moved it BACKWARD into `$out` --
+    # creating a `$out` -> `$dev` -> (nothing, but now ALSO `$out`
+    # itself, since `$dev/lib/pkgconfig/freetype2.pc`'s own `includedir`
+    # substitution still pointed at `$dev`) reference cycle, which
+    # Nix's own builder rejected outright ("cycle detected ... in the
+    # references of output 'dev' from output 'out'"). The fix below
+    # moves content OUT OF `$out` specifically -- never scanning any
+    # OTHER output -- exactly matching what actually needs fixing here
+    # (phase 1's forced single output baked EVERYTHING into `$out`;
+    # nothing else has stray content misplaced by THIS mechanism).
+    dyndrvMoveFromOut() {
+      local patt="$1" dstOut="$2"
+      [ "$dstOut" = "$out" ] && return 0
+      local srcPath
+      for srcPath in "$out"/$patt; do
+        [ -e "$srcPath" ] || [ -L "$srcPath" ] || continue
+        local dstPath="$dstOut''${srcPath#"$out"}"
+        mkdir -p "$(dirname "$dstPath")"
+        if [ -d "$dstPath" ] && [ -d "$srcPath" ]; then
+          rmdir "$srcPath" --ignore-fail-on-non-empty
+          if [ -d "$srcPath" ]; then
+            mv -t "$dstPath" "$srcPath"/*
+            rmdir "$srcPath"
+          fi
+        else
+          mv "$srcPath" "$dstPath"
+        fi
+      done
+    }
+    # Order matters: this runs BEFORE `_multioutDocs`/`_multioutDevs`,
+    # since THEIR own `moveToOutput lib/pkgconfig ...`/etc calls
+    # iterate over every REAL output's current content (including
+    # `$lib`, once THIS step has already populated it) -- confirmed
+    # necessary by direct reproduction: running them in the opposite
+    # order left `$lib/lib/pkgconfig` unmoved to `$dev`, since at that
+    # point `$lib` didn't exist yet, only `$out/lib/pkgconfig` did (and
+    # `_multioutDevs`'s own loop had already finished by the time this
+    # step would have populated `$lib`).
+    dyndrvMoveFromOut bin "''${!outputBin}"
+    dyndrvMoveFromOut sbin "''${!outputBin}"
+    dyndrvMoveFromOut lib "''${!outputLib}"
+    dyndrvMoveFromOut libexec "''${!outputLib}"
+    dyndrvMoveFromOut share/locale "''${!outputLib}"
+    # nixpkgs' own `_multioutDevs`/`_multioutDocs` (declared by
+    # `multiple-outputs.sh`, unconditionally sourced by stdenv, so
+    # always available as plain bash functions here regardless of
+    # whether THIS package opted into multiple outputs) run NOW, after
+    # the ordinary-content redistribution above -- confirmed necessary
+    # by direct reproduction against real freetype: leaving this to the
+    # ORDINARY `preFixupHooks` array (which already contains these same
+    # functions) is NOT reliable, since a caller's OWN
+    # `nativeBuildInputs` can register another `preFixupHooks` entry
+    # (freetype's own `flatten-include-hack-hook`) that happens to run
+    # first and expects `$dev/include` to already exist -- confirmed
+    # this exact ordering failure by direct reproduction ("cd:
+    # .../include: No such file or directory"). Calling these
+    # explicitly here, unconditionally, makes the split happen
+    # deterministically before ANY other `preFixupHook` gets a chance
+    # to run, matching what an ordinary (non-accelerated) build's own
+    # install-time behavior already guaranteed for free. Both are
+    # no-ops (their own top-line `getAllOutputNames`/`-z` checks) when
+    # `outputs` is just `"out"`.
     _multioutDocs
     _multioutDevs
   '';

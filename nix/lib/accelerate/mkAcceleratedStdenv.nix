@@ -1075,7 +1075,27 @@ let
       # -- before this check, `len - 2` went negative for that 1-element
       # argv, and `builtins.genList` threw outright ("cannot create list
       # of size -1") rather than either passing through or deferring.
-      isProbe = len < 2 || hasPrefix "-" (builtins.elemAt argv 0);
+      #
+      # ALSO passthrough if `--version`/`--help` appears ANYWHERE in
+      # argv, not just as `argv[0]` -- confirmed necessary by direct
+      # reproduction against real nixpkgs x264: its own `./configure`
+      # unconditionally probes LTO-plugin support via `gcc-ar --plugin
+      # /nix/store/<hash>-gcc-.../liblto_plugin.so --version` -- the
+      # plugin path itself is a REAL, non-`-`-prefixed positional
+      # argument, so the ORIGINAL `hasPrefix "-" (elemAt argv 0)` check
+      # alone missed this shape entirely (`argv[0]` here is
+      # `--plugin`, which DOES start with `-`... but a package could
+      # just as easily probe `gcc-ar --plugin=<path> --version` with
+      # NO leading flag at all if `--plugin` and its value are glued;
+      # scanning the WHOLE argv for the version/help flag, rather than
+      # inferring from position, is the robust fix that covers both
+      # shapes and any other flag ordering a toolchain might probe
+      # with).
+      isProbe =
+        len < 2
+        || hasPrefix "-" (builtins.elemAt argv 0)
+        || builtins.elem "--version" argv
+        || builtins.elem "--help" argv;
       modifiers = builtins.elemAt argv 0;
       inputs = builtins.genList (i: builtins.elemAt argv (i + 2)) (len - 2);
       argvForAr = [ modifiers "$out" ] ++ inputs;
@@ -1234,8 +1254,16 @@ let
       # defers it, producing a bogus stub instead of running the real
       # probe. A real "index this archive" invocation always has AT
       # LEAST ONE non-flag positional arg (the archive path itself);
-      # a probe has none at all.
-      isProbe = !(builtins.any (a: !(hasPrefix "-" a)) argv);
+      # a probe has none at all. ALSO passthrough if `--version`/
+      # `--help` appears anywhere in argv -- see `arToNode`'s own
+      # matching comment on x264's `gcc-ranlib --plugin <path>
+      # --version` shape, where the plugin path's own non-`-`-prefixed
+      # value would otherwise satisfy `builtins.any (a: !(hasPrefix
+      # "-" a)) argv` and misclassify the whole invocation as real.
+      isProbe =
+        !(builtins.any (a: !(hasPrefix "-" a)) argv)
+        || builtins.elem "--version" argv
+        || builtins.elem "--help" argv;
       # `ranlib`'s only positional argument (the LAST one, tolerating
       # any leading flags like `-D`) is both its input AND its own
       # output -- it indexes an archive in place, it doesn't produce a
