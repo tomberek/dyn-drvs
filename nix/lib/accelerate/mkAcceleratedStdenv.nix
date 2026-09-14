@@ -441,26 +441,40 @@ let
   discoverTree = ''
     args=""
     skip_next=0
-    has_c_flag=0
+    has_source_file=0
     for a in "$@"; do
       if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
       case "$a" in
-        -c) has_c_flag=1; continue ;;
-        -MMD|-MD|-MP) continue ;;
+        -c|-MMD|-MD|-MP) continue ;;
         -o|-MF|-MT|-MQ) skip_next=1; continue ;;
-        *) args="$args $a" ;;
+        *.c|*.cc|*.cpp|*.cxx|*.c++|*.m|*.mm) has_source_file=1 ;;
       esac
+      args="$args $a"
     done
-    # A link invocation (no `-c`) has no headers to discover -- `cc
-    # <objs> -M -MG` treats every `.o`/`.a` positional arg as "unused
-    # linker input" and prints nothing anyway (confirmed by direct
-    # reproduction), so running the scan at all is wasted work every
-    # single link step pays for no benefit. Skipping it here doesn't fix
-    # the real link-step dependency-loss bug on its own (that's a
-    # cwd-relative-path-frame mismatch, fixed via `DYNDRV_INVOCATION_CWD`
-    # -- see `wrapCommand.nix`'s own header comment) -- this is purely an
-    # efficiency fix for a scan that could never have succeeded here.
-    if [ "$has_c_flag" = 0 ]; then
+    # Skip the `-M -MG` scan only for a GENUINE link-only invocation
+    # (positional args are all `.o`/`.a`, no real source file anywhere)
+    # -- `cc <objs> -M -MG` treats every `.o`/`.a` positional arg as
+    # "unused linker input" and prints nothing anyway (confirmed by
+    # direct reproduction), so running the scan there is wasted work
+    # for no benefit. Checking `has_c_flag` ALONE was wrong: a common
+    # pattern compiles AND links a real source file in ONE invocation
+    # with no `-c` at all (`cc foo.c libbar.a -o foo`) -- confirmed by
+    # direct reproduction against real giflib: its own small CLI
+    # utilities (gifinto.c etc.) build exactly this way, and skipping
+    # the scan for them dropped their own `#include "getarg.h"`
+    # discovery entirely ("fatal error: getarg.h: No such file or
+    # directory"). `has_source_file` (true the moment ANY positional
+    # arg ends in a recognized source extension) is the real
+    # distinguishing condition; `has_c_flag` was only ever a proxy for
+    # it, correct for cmake/libtool's own convention of never mixing
+    # compile and link in one invocation but wrong in general. Skipping
+    # this scan doesn't fix the real link-step dependency-loss bug on
+    # its own (that's a cwd-relative-path-frame mismatch, fixed
+    # unconditionally via `DYNDRV_INVOCATION_CWD` -- see `wrapCommand.
+    # nix`'s own header comment) -- this is purely an efficiency fix for
+    # a scan that could never succeed for a pure link, and must stay
+    # correct for the compile+link-in-one-step case too.
+    if [ "$has_source_file" = 0 ]; then
       exit 0
     fi
     ${realCc} $args -M -MG 2>/dev/null \
