@@ -135,7 +135,11 @@ jobs:
       # (not the isolated `$DYNDRV_STORE`): the fetched+built patched-Nix
       # itself (`try-it-out/patched-nix.nix`, resolved via a plain `nix
       # build` inside `try-it-out/run-nix.sh` before it ever re-execs
-      # into the diverted store -- see that script's own header comment).
+      # into the diverted store -- see that script's own header comment),
+      # PLUS the flake's own `.#default` output (`flake.nix`'s
+      # `packages.<system>.default` -- a thin `writeShellScriptBin`
+      # wrapper around that SAME patched-Nix build, the one thing the
+      # "Comment trynix.dev preview link" step below actually boots).
       # This is the single most expensive, most cache-worthy build in
       # this whole workflow (a full NixOS/nix checkout). Every OTHER
       # derivation this job builds (every `dyndrv-*`/`example-*` check)
@@ -164,3 +168,29 @@ jobs:
             --argstr system "$SYSTEM" \
             -f try-it-out/patched-nix.nix '^*' || true)
           [[ -n "$OUT" ]] && echo "$OUT" | cachix push "$CACHIX_CACHE"
+          DEFAULT_OUT=$(nix build --no-link --print-out-paths .#default || true)
+          [[ -n "$DEFAULT_OUT" ]] && echo "$DEFAULT_OUT" | cachix push "$CACHIX_CACHE"
+
+      # Comments a trynix.dev link on the PR that boots `.#default`
+      # (the patched-Nix wrapper script from `try-it-out/patched-nix.nix`
+      # -- see that file's own header comment, and this workflow's
+      # "Push patched-nix to Cachix" step just above) directly in the
+      # reviewer's browser -- "a reviewer runs the branch in a tab
+      # instead of checking it out" (fzakaria/trynix's own README).
+      # `build: false` (the default): the browser only needs the store
+      # PATHS to exist in the cache, which the push step above already
+      # guarantees whenever `CACHIX_AUTH_TOKEN` is configured -- no
+      # second, duplicate build here. `verify: warn` (also the default):
+      # a fork PR's push step above skips (no repo secret), so this
+      # step would otherwise warn on every fork PR that the cache lacks
+      # the path -- acceptable, matches this workflow's own existing
+      # "skip gracefully without secrets" pattern elsewhere. Only makes
+      # sense on `pull_request` (it comments on a PR; a plain `push` to
+      # `master` has no PR to comment on).
+      - name: Comment trynix.dev preview link
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: fzakaria/trynix@v1
+        with:
+          cache: https://${{ env.CACHIX_CACHE }}.cachix.org
+          publicKey: dynamicderivations.cachix.org-1:AmDuQASmWJsVYB/r0TGTZnQSnoxPzKP8ijfGw/6aT3k=
+          attrs: .#default
