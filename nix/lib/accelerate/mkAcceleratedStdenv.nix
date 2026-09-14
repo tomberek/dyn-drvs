@@ -518,6 +518,38 @@ let
                 else acc
       ) (-1) indices;
 
+      # Every index whose OWN VALUE is the following argv element, for a
+      # value-taking flag that is NOT itself a real positional file --
+      # `-o <output>`, `-MT <target>`, `-MF <depfile>`, `-MQ <target>`
+      # (quoted-Make-target variant of `-MT`) all take one. Both
+      # `firstSourceIdx` (below) and `positionalIdxs` need to skip every
+      # one of these value slots, not just `-o`'s -- confirmed necessary
+      # by direct reproduction against real nixpkgs `xxhash` (cmake):
+      # a real compile's own argv is `... -MD -MT $out -MF <relative-
+      # depfile-path> -o $out -c /build/source/xxhash.c` (cmake always
+      # emits `-MT`/`-MF` ahead of `-o`/`-c`) -- BEFORE this fix,
+      # `firstSourceIdx`'s own scan (which only excluded `-o`'s value)
+      # latched onto `-MT`'s own value first (a RELATIVE path, no `-`
+      # prefix, and not `outIdx + 1`), treating it as `sourcePath`
+      # instead of the REAL, absolute source at the argv's own end --
+      # which meant the EXISTING "passthrough a compile whose source is
+      # still absolute" check (a few lines below) never fired for this
+      # shape at all, since `sourcePath` was never actually the source
+      # file. The compile got wrongly deferred into a per-TU derivation
+      # anyway, which then failed for real with `cc1: fatal error:
+      # /build/source/xxhash.c: No such file or directory` (the deferred
+      # derivation's own staged tree, built from `discoverTree`'s
+      # relative-path scan, never contains an absolute host path at
+      # all). This was originally misdiagnosed as a `discoverTree`
+      # staging/out-of-tree-cmake bug (see `docs/discovertree-cmake-
+      # source-path-bug.md`) -- confirmed by direct reproduction that
+      # the REAL cause is this argv-shape misclassification, one level
+      # earlier than `discoverTree` ever runs.
+      valueSlotIdxs = builtins.filter (
+        i: builtins.elem (builtins.elemAt argv i) [ "-o" "-MT" "-MF" "-MQ" ]
+      ) indices;
+      isValueSlotValue = i: builtins.elem (i - 1) valueSlotIdxs;
+
       # Real builds routinely omit `-o` entirely for a COMPILE (confirmed
       # by direct reproduction against a real `libtool --mode=compile`-
       # driven autotools build, freetype) -- when absent, the compiler's
@@ -529,7 +561,7 @@ let
       # `-o` for a link) but handled uniformly rather than assumed away.
       firstSourceIdx = builtins.foldl' (
         acc: i: if acc != (-1) then acc
-                else if !(hasPrefix "-" (builtins.elemAt argv i)) && !(i == outIdx + 1) then i
+                else if !(hasPrefix "-" (builtins.elemAt argv i)) && !(isValueSlotValue i) then i
                 else acc
       ) (-1) indices;
       stripExt = s:
@@ -624,7 +656,7 @@ let
       # inputs a link step would combine, or the single source a
       # compile-to-executable probe names.
       positionalIdxs = builtins.filter (
-        i: !(hasPrefix "-" (builtins.elemAt argv i)) && i != outIdx + 1
+        i: !(hasPrefix "-" (builtins.elemAt argv i)) && !(isValueSlotValue i)
       ) indices;
       positionalArgs = map (i: builtins.elemAt argv i) positionalIdxs;
       looksLikeObjectOrArchive = a: hasSuffix ".o" a || hasSuffix ".a" a || hasSuffix ".so" a;

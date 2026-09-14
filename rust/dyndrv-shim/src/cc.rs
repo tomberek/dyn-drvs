@@ -162,9 +162,30 @@ pub fn cc_to_node(
         .map(|i| i as i64)
         .unwrap_or(-1);
 
-    // `firstSourceIdx`: first non-flag arg that isn't `-o`'s own
-    // value. NOTE: this exclusion check is UNCONDITIONAL in the
-    // original bash (`ccToNodeBash`) -- when `out_idx == -1`,
+    // Every index whose OWN VALUE is the following argv element, for a
+    // value-taking flag that is NOT itself a real positional file --
+    // `-o`/`-MT`/`-MF`/`-MQ` all take one. Port of `toNode`'s own
+    // `valueSlotIdxs`/`isValueSlotValue` -- see that binding's own
+    // header comment in `mkAcceleratedStdenv.nix` for the full "why":
+    // without this, `first_source_idx` (below) latched onto `-MT`'s own
+    // value (a relative depfile-target path cmake always emits ahead of
+    // the real source) instead of the actual, absolute source file at
+    // the argv's own end, which meant the "compile whose source is still
+    // absolute" passthrough check never fired for a real cmake compile
+    // at all -- confirmed by direct reproduction against real nixpkgs
+    // `xxhash`.
+    let value_slot_idxs: Vec<usize> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a.as_str(), "-o" | "-MT" | "-MF" | "-MQ"))
+        .map(|(i, _)| i)
+        .collect();
+    let is_value_slot_value =
+        |i: usize| i > 0 && value_slot_idxs.contains(&(i - 1));
+
+    // `firstSourceIdx`: first non-flag arg that isn't a value-taking
+    // flag's own value. NOTE: this exclusion check is UNCONDITIONAL in
+    // the original bash (`ccToNodeBash`) -- when `out_idx == -1`,
     // `out_idx + 1 == 0`, so index 0 is excluded from candidacy even
     // though no `-o` is present at all. This is a preserved quirk of
     // the bash sentinel arithmetic, not a Rust-specific choice --
@@ -176,7 +197,7 @@ pub fn cc_to_node(
     let first_source_idx: i64 = argv
         .iter()
         .enumerate()
-        .find(|(i, a)| !a.starts_with('-') && *i as i64 != out_idx + 1)
+        .find(|(i, a)| !a.starts_with('-') && !is_value_slot_value(*i))
         .map(|(i, _)| i as i64)
         .unwrap_or(-1);
 
@@ -219,9 +240,9 @@ pub fn cc_to_node(
         if a.starts_with('-') {
             continue;
         }
-        // Same unconditional `i == out_idx + 1` exclusion as
-        // `first_source_idx` above -- see that binding's own comment.
-        if i as i64 == out_idx + 1 {
+        // Same exclusion as `first_source_idx` above -- see that
+        // binding's own comment.
+        if is_value_slot_value(i) {
             continue;
         }
         has_positional = true;

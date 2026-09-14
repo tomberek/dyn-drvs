@@ -38,13 +38,14 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-21 are the
+      # via two separate attr-path invocations. Examples 17-22 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus the follow-up
-      # compile+link-in-one-step regression #130's own link-skip
-      # optimization introduced, each confirmed failing before its own
-      # fix and passing after -- see each file's own header comment for
+      # phase-dropping, `finalAttrs.finalPackage`) plus two follow-up
+      # argv-shape-classification regressions (compile+link-in-one-step,
+      # and `-MT`/`-MF` values misidentified as the source file), each
+      # confirmed failing before its own fix and passing after -- see
+      # each file's own header comment for
       # the exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
@@ -71,6 +72,7 @@
           example-19 = import ./try-it-out/examples/19-accelerate-autoreconf.nix { inherit pkgs; };
           example-20 = import ./try-it-out/examples/20-accelerate-final-package.nix { inherit pkgs; };
           example-21 = import ./try-it-out/examples/21-accelerate-compile-and-link-one-step.nix { inherit pkgs; };
+          example-22 = import ./try-it-out/examples/22-accelerate-mt-mf-absolute-source.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

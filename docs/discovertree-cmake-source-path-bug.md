@@ -1,12 +1,80 @@
-# Bug: `discoverTree` doesn't resolve cmake out-of-tree relative source paths
+# FIXED: `firstSourceIdx` misidentified `-MT`/`-MF`'s own values as the source file
 
-## Summary
+## Status: fixed
+
+The original diagnosis in this file (below, kept as history) was WRONG.
+This was never a `discoverTree` staging/out-of-tree-cmake-path problem —
+confirmed by direct reproduction against real nixpkgs `xxhash` that the
+actual bug is one level earlier, in `toNode`/`cc_to_node`'s own argv-shape
+classification.
+
+## The real root cause
+
+`firstSourceIdx` (`toNode`, `mkAcceleratedStdenv.nix`) and its Rust port
+`first_source_idx` (`cc.rs`) scan argv for "the first non-flag token that
+isn't `-o`'s own value," treating that as `sourcePath`. But cmake's own
+generated compile lines always look like:
+
+```
+cc ... -MD -MT $out -MF <relative-depfile-path> -o $out -c /build/source/xxhash.c
+```
+
+`-MT`'s own value (here, `$out` — a relative Make-target string, not a
+source file) and `-MF`'s own value (a relative depfile path) both come
+BEFORE `-c`'s own real, absolute source argument, and neither was ever
+excluded from the "first non-flag token" scan — only `-o`'s value was.
+So `firstSourceIdx` latched onto `-MT`'s own value as `sourcePath`,
+completely missing the real source file at the argv's own end.
+
+This silently broke the ALREADY-EXISTING "pass through a compile whose
+source is still an absolute path" check (`hasCompileFlag && sourcePath
+!= null && hasPrefix "/" sourcePath`) — that check depends entirely on
+`sourcePath` being the REAL source argument. Since `sourcePath` was
+actually `-MT`'s own relative value, the check never fired, and a real
+cmake compile with a genuinely absolute source path got wrongly
+deferred into a per-TU derivation instead of passed through — which
+then failed for real, since a deferred derivation's own staged tree
+(built from `discoverTree`'s relative-path scan) never contains an
+absolute host path at all:
+
+```
+cc1: fatal error: /build/source/xxhash.c: No such file or directory
+```
+
+## The fix
+
+`firstSourceIdx`/`positionalIdxs` (and their Rust equivalents) now
+exclude the VALUE of every value-taking flag that can appear ahead of
+the real source/output — `-o`, `-MT`, `-MF`, `-MQ` — not just `-o`'s.
+A new `valueSlotIdxs`/`isValueSlotValue` helper computes this once and
+is shared by both scans.
+
+## Regression fixture
+
+`try-it-out/examples/22-accelerate-mt-mf-absolute-source.nix`
+reproduces the exact `-MD -MT ... -MF ... -o ... -c <absolute path>`
+shape with a real absolute source path — confirmed failing before this
+fix (the compile step wrongly deferred and failed), passing after (the
+compile step correctly passes through and runs synchronously), on both
+the bash and compiled-Rust paths.
+
+## Where this was found
+
+Direct reproduction against real, unmodified nixpkgs `xxhash` (via
+`~/overlay`'s downstream package-porting survey), building it through
+`accelerate.mkAcceleratedStdenv` and inspecting the registered per-TU
+`.drv`'s own rendered command line via `nix derivation show`
+equivalent (reading the raw ATerm).
+
+---
+
+## Original (incomplete) diagnosis, kept as history
 
 Found while surveying more real nixpkgs packages against
 `accelerate.mkAcceleratedStdenv` in a downstream showcase repo. nixpkgs'
 `xxhash` builds via cmake, with the cmake project rooted one directory
 below the actual sources (`cmakeDir = "build/cmake"`, sources live in the
-parent directory). Every real per-TU compile fails identically:
+parent directory). Every real per-TU compile failed identically:
 
 ```console
 $ pkgs.xxhash.override { stdenv = dyndrv.accelerate.mkAcceleratedStdenv { stdenv = pkgs.stdenv; inherit nixPackage; }; }
@@ -15,54 +83,12 @@ cc1: fatal error: /build/source/xxhash.c: No such file or directory
 compilation terminated.
 ```
 
-Same failure for every other TU in the package (`cli/xsum_arch.c`,
-`xsum_bench.c`, `xsum_os_specific.c`, `xsum_output.c`,
-`xsum_sanity_check.c`, `cli/xxhsum.c`).
+The original theory was that `discoverTree`'s own per-TU sandbox staging
+didn't resolve cmake's out-of-tree relative source paths correctly. That
+theory was never confirmed and turned out to be wrong — the real bug
+(above) is upstream of `discoverTree` entirely: the compile should have
+been passed through, never staged/deferred at all.
 
-## Root cause (partial -- not yet fully traced)
-
-Unlike the link-step bug (`discovertree-link-step-bug.md`), this fails at
-the *compile* step, not a link. `CMakeDetermineCompilerABI` and the
-configure step succeed fine, so cmake itself can see the sources. The
-failure is specifically in how `discoverTree`'s per-TU sandbox stages
-files: the path cmake bakes into the actual compile command
-(`/build/source/xxhash.c`) is an absolute in-sandbox path pointing at
-where the *outer* (unaccelerated) build would have the full source tree
-unpacked, but the per-TU sandbox `discoverTree` stages only contains
-whatever the `-M -MG` scan found relative to the compiler's invocation
-directory -- which for a cmake build one level below the source root
-apparently doesn't line up with the absolute path cmake actually invokes
-`cc` with.
-
-This is distinct from the link-step bug: it affects real compiles (not
-links), and the missing file is the primary source itself (not a header
-or object file).
-
-## Confirmed pattern: also seen on re2 (cmake+ninja), but shaped differently
-
-re2 (google/re2, cmake+ninja) hits a related-looking but distinct
-failure: 20 of ~51 compile-unit derivations fail with
-
-```
-cc1plus: fatal error: re2/prefilter.cc: No such file or directory
-```
-
-(also `re2/bitstate.cc`, `re2/compile.cc`, `util/strutil.cc`, most of
-`re2/testing/*_test.cc`) -- again a *compile*-step failure on the primary
-source file, not link, not header. re2's cmake project is NOT out-of-tree
-the way xxHash's is (no separate `build/cmake` subdir), so "out-of-tree
-cmake dir" isn't the full story -- something about cmake+ninja-generated
-compile invocations (as opposed to cmake+make, which zstd/pcre2/freetype
-use) may be involved instead, or in addition. Not yet root-caused to the
-same level of confidence as the link-step bug -- needs a `nix derivation
-show` + `-M -MG` manual repro pass the way the link-step bug got before
-being fully trusted.
-
-## Where this was found
-
-Downstream showcase repo, ultracode survey pass looking for more
-dyn-drvs-compatible nixpkgs packages beyond freetype/giflib/tinycbor.
-Both xxHash and re2 used `nixPackage` explicitly pinned to
-`try-it-out/patched-nix.nix` (avoiding the version-mismatch pitfall
-documented in `discovertree-link-step-bug.md`), so this is not that
-pitfall recurring.
+re2 (google/re2, cmake+ninja) hit the identical underlying bug, shaped
+slightly differently (ninja-generated compile lines also emit `-MT`/
+`-MF` ahead of the real source).

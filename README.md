@@ -261,10 +261,6 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   stable release includes it yet, so most installed Nix binaries don't
   have it out of the box; `try-it-out/patched-nix.nix` fetches one
   directly, or use `capabilities.withFallback` to degrade to IFD.
-- **cmake-driven builds can fail per-TU compiles with a source-not-found
-  error** — confirmed on `xxhash` (out-of-tree `cmakeDir`) and `re2`
-  (cmake+ninja); root cause not yet fully isolated. See
-  `docs/discovertree-cmake-source-path-bug.md`.
 - **A freshly-linked binary can lose its execute bit**, breaking any
   package whose build script runs its own just-built binary before
   `installPhase` (e.g. `libb64`'s Makefile-driven self-test). See
@@ -280,6 +276,15 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   depcomp idiom fails immediately after every real compile succeeds,
   since only the primary `-o` output is tracked. Confirmed on `gperf`.
   See `docs/depfile-side-output-bug.md`.
+- **The synthesized `dyndrvRestoreOutput` phase runs too late for a
+  package whose `postInstall` touches `$out` itself** (e.g.
+  `wrapProgram`) — `postInstall` fires as part of nixpkgs'
+  `installPhase` itself, before `dyndrvRestoreOutput` (inserted as a
+  separate phase AFTER `installPhase`) ever copies the placeholder tree
+  into the real `$out`. Confirmed on `mosh` (`wrapProgram
+  $out/bin/mosh` fails with "does not exist" even though `bin/mosh`
+  really was installed, just under the still-not-yet-restored
+  placeholder root). See `docs/split-postinstall-before-restore-bug.md`.
 
 See `docs/upstream-tracking.md` for which of these trace back to a
 specific NixOS/nix issue, rather than being a `dyndrv`-side gap.
