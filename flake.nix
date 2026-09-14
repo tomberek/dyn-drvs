@@ -38,19 +38,20 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-26 are the
+      # via two separate attr-path invocations. Examples 17-27 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus five follow-up
+      # phase-dropping, `finalAttrs.finalPackage`) plus six follow-up
       # argv-shape/phase-ordering/dependency-wiring regressions (compile+
       # link-in-one-step, `-MT`/`-MF` values misidentified as the source
       # file, `ar`/`ranlib` probe-invocation crashes, cmake+make's own
       # out-of-tree install failure, `ar`'s own real store-path inputs
-      # never wired as derivation deps, and a `-Wl,`-glued flag's own
+      # never wired as derivation deps, a `-Wl,`-glued flag's own
       # embedded path never unglued before computing its output
-      # directory), each confirmed failing before its own fix and
-      # passing after -- see each file's own header comment for the
-      # exact bug it guards against.
+      # directory, and `dyndrvRestoreOutput` running too late for a
+      # `postInstall` that reads/writes `$out` directly), each confirmed
+      # failing before its own fix and passing after -- see each file's
+      # own header comment for the exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
           inherit pkgs;
@@ -81,6 +82,7 @@
           example-24 = import ./try-it-out/examples/24-accelerate-cmake-make-outoftree.nix { inherit pkgs; };
           example-25 = import ./try-it-out/examples/25-accelerate-ar-multi-input.nix { inherit pkgs; };
           example-26 = import ./try-it-out/examples/26-accelerate-wl-dependency-file.nix { inherit pkgs; };
+          example-27 = import ./try-it-out/examples/27-accelerate-postinstall-reads-out.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

@@ -312,19 +312,141 @@ let
   # file's header comment for the full "why two levels" explanation.
   sandboxedResult = self.mkOutputOf (self.mkOutputOf sandboxedDrv "out") "out";
 
-  # A synthesized `dyndrvRestoreOutput` phase is inserted immediately
-  # after EVERY `"installPhase"` entry in `replayPhases` (ordinarily just
-  # the one) -- see this file's own "THE RESTORE STEP" header comment
-  # above for the full rationale. It merges `dyndrvPlaceholderOut` (the
-  # EXACT path `sandboxedDrv.out` is set to above -- not a placeholder to
-  # look up, a known constant) into the real `$out`, via
-  # `cp -r` (not a plain `mv`) specifically so any file `installPhase`
-  # already wrote directly to the real `$out`/`$dev` (unaffected by this
-  # bug, e.g. via a `postInstall` hook referencing `$dev` directly) is
-  # left untouched rather than clobbered. A no-op (skipped entirely) for
-  # any package whose `configureFlags` never bake `$out`'s value in
-  # literally, so this is safe to always insert rather than something a
-  # caller opts into.
+  # Shared restore-logic body, split into two INDEPENDENT scripts:
+  #
+  # `dyndrvCopyPlaceholderScript`: copies `dyndrvPlaceholderOut`'s tree
+  # into the real `$out` (plus the meson-specific DESTDIR hoist). This
+  # part MUST run BEFORE any caller-supplied `postInstall` gets a
+  # chance to read/write `$out` -- see task #140's own writeup (`docs/
+  # split-postinstall-before-restore-bug.md`, confirmed via real
+  # nixpkgs `mosh`'s `wrapProgram $out/bin/mosh` and `leveldb`'s
+  # `substituteInPlace "$out"/...`) -- so it's prepended directly to
+  # `replay`'s own `postInstall` below, not left to run as a separate
+  # phase afterward.
+  #
+  # `dyndrvMultioutSplitScript`: nixpkgs' own `_multioutDocs`/
+  # `_multioutDevs` (redistributing `$out`'s now-complete content
+  # across the real per-output paths, e.g. `$dev/include`). This part
+  # must run AFTER `installPhase` (and thus after ANY caller-supplied
+  # `postInstall`) fully RETURNS, not before -- confirmed necessary by
+  # direct reproduction against real leveldb: its own `postInstall`
+  # (`substituteInPlace "$out"/lib/cmake/leveldb/leveldbTargets.cmake
+  # ...`) expects `$out/lib/cmake` to still be sitting under `$out`
+  # itself, NOT yet moved to `$dev` -- running the multi-output split
+  # too early (inside `postInstall`, alongside the placeholder-copy
+  # above) moved `lib/cmake` to `$dev` BEFORE `leveldb`'s own
+  # `postInstall` got a chance to read it at its ORIGINAL `$out`
+  # location, so `substituteInPlace` failed with "file ... does not
+  # exist" -- a regression this exact split fixes. Kept in the
+  # synthesized `dyndrvRestoreOutput` phase (runs immediately after
+  # `installPhase` returns, before `fixupPhase`), exactly where it
+  # already ran before task #140's own fix, for the SAME reason
+  # `dyndrvRestoreOutput`'s own header comment already documents
+  # (deterministic ordering ahead of any OTHER `preFixupHooks` entry,
+  # confirmed necessary against real freetype).
+  #
+  # Both scripts are individually idempotent (`[ -d ... ]`/
+  # `[ -n ... ] && [ -d ... ]` guards) -- running `dyndrvCopyPlaceholder
+  # Script` a second time, once it has already emptied
+  # `dyndrvPlaceholderOut`/`$out$dyndrvPhase1Out`, is a pure no-op, so
+  # the SAME script safely runs from both the prepended `postInstall`
+  # hook AND (as a fallback, for a caller whose own `replayPhases`
+  # never includes `"installPhase"` at all) the phase below.
+  dyndrvCopyPlaceholderScript = ''
+    if [ -d ${dyndrvPlaceholderOut} ]; then
+      mkdir -p "$out"
+      cp -r ${dyndrvPlaceholderOut}/. "$out"/
+      chmod -R u+w "$out"
+      rm -rf ${dyndrvPlaceholderOut}
+    fi
+    # `dyndrvPhase1Out` (see `dyndrvCdToBuildDir` above) is only set
+    # for a meson build -- `meson install`'s own `$DESTDIR` PREPENDS
+    # itself onto the baked-in prefix rather than substituting for
+    # it, so the real content is sitting at `$out$dyndrvPhase1Out`
+    # (a literal string concatenation -- both `$out` and
+    # `$dyndrvPhase1Out` are absolute paths in their own right, e.g.
+    # `$out` == `/nix/store/AAAA-nix-util-2.36.0pre` and
+    # `$dyndrvPhase1Out` == `/nix/store/BBBB-nix-util-2.36.0pre.drv`,
+    # giving the nested `/nix/store/AAAA-.../nix/store/BBBB-...`)
+    # rather than directly under `$out` itself -- hoist it up one
+    # level, the same way the autotools-specific restore step above
+    # does for its own differently-shaped baked path.
+    if [ -n "''${dyndrvPhase1Out:-}" ] && [ -d "$out$dyndrvPhase1Out" ]; then
+      dyndrvHoistTmp="$out/.dyndrv-hoist-tmp"
+      mkdir -p "$dyndrvHoistTmp"
+      cp -r "$out$dyndrvPhase1Out"/. "$dyndrvHoistTmp"/
+      rm -rf "''${out:?}''${dyndrvPhase1Out:?}"
+      cp -r "$dyndrvHoistTmp"/. "$out"/
+      rm -rf "$dyndrvHoistTmp"
+      chmod -R u+w "$out"
+    fi
+  '';
+  dyndrvMultioutSplitScript = ''
+    # Everything landed under the single `$out` root, since phase 1
+    # (where these paths were baked in) only ever had ONE output --
+    # for a real multi-output package, nixpkgs' own `_multioutDevs`/
+    # `_multioutDocs` (declared by `multiple-outputs.sh`,
+    # unconditionally sourced by stdenv, so always available as plain
+    # bash functions here regardless of whether THIS package opted
+    # into multiple outputs) must run NOW, before anything else, to
+    # redistribute `$out`'s content across the real outputs --
+    # confirmed necessary by direct reproduction against real
+    # freetype: leaving this to the ORDINARY `preFixupHooks` array
+    # (which already contains these same functions) is NOT reliable,
+    # since a caller's OWN `nativeBuildInputs` can register another
+    # `preFixupHooks` entry (freetype's own `flatten-include-hack-
+    # hook`) that happens to run first and expects `$dev/include` to
+    # already exist -- confirmed this exact ordering failure by direct
+    # reproduction ("cd: .../include: No such file or directory").
+    # Calling these explicitly here, unconditionally, makes the split
+    # happen deterministically before ANY other `preFixupHook` gets a
+    # chance to run, matching what an ordinary (non-accelerated)
+    # build's own install-time behavior already guaranteed for free.
+    # Both are no-ops (their own top-line `getAllOutputNames`/`-z`
+    # checks) when `outputs` is just `"out"`.
+    _multioutDocs
+    _multioutDevs
+  '';
+
+  # A synthesized `dyndrvRestoreOutput` phase is ALSO inserted
+  # immediately after EVERY `"installPhase"` entry in `replayPhases`
+  # (ordinarily just the one) -- see this file's own "THE RESTORE STEP"
+  # header comment above for the full rationale. It merges
+  # `dyndrvPlaceholderOut` (the EXACT path `sandboxedDrv.out` is set to
+  # above -- not a placeholder to look up, a known constant) into the
+  # real `$out`, via `cp -r` (not a plain `mv`) specifically so any file
+  # `installPhase` already wrote directly to the real `$out`/`$dev`
+  # (unaffected by this bug, e.g. via a `postInstall` hook referencing
+  # `$dev` directly) is left untouched rather than clobbered. A no-op
+  # (skipped entirely) for any package whose `configureFlags` never bake
+  # `$out`'s value in literally, so this is safe to always insert rather
+  # than something a caller opts into.
+  #
+  # THIS ALONE IS NOT ENOUGH: nixpkgs' own `installPhase` calls
+  # `runHook postInstall` as its OWN LAST STATEMENT, still fully inside
+  # `installPhase` itself -- `postInstall` is a HOOK, not a separate
+  # phase, so it fires BEFORE `installPhase` returns, i.e. strictly
+  # BEFORE this synthesized phase (the NEXT one in the list) ever runs.
+  # Confirmed by direct reproduction against real nixpkgs `mosh`: its
+  # own `postInstall` (`wrapProgram $out/bin/mosh ...`) failed outright
+  # ("Cannot wrap ... because it does not exist"), even though
+  # `bin/mosh` genuinely HAD been installed by `make install` moments
+  # earlier -- just under the placeholder root, not yet restored to the
+  # real `$out` this `postInstall` hook reads. `docs/split-postinstall-
+  # before-restore-bug.md` has the full writeup (also independently
+  # re-confirmed via real leveldb's own `postInstall`, `substituteInPlace
+  # "$out"/lib/cmake/leveldb/leveldbTargets.cmake`).
+  #
+  # Fixed by ALSO prepending the identical restore logic to `replay`'s
+  # own `postInstall` (below, in the final `stdenv.mkDerivation` call)
+  # -- so it runs FIRST, before ANY caller-supplied `postInstall`
+  # content gets a chance to read/write `$out`. The phase inserted here
+  # is KEPT as a fallback/safety net (its own `[ -d ... ]` guard makes a
+  # second invocation, after the `postInstall`-hook copy already moved
+  # everything out of `dyndrvPlaceholderOut`, a pure no-op) for the rare
+  # case a caller's own `replayPhases` never includes `"installPhase"`
+  # at all (some fully custom phase list), where the `postInstall`-hook
+  # prepend below would never fire.
   finalReplayPhases = lib.concatMap (
     p: if p == "installPhase" then [ p "dyndrvRestoreOutput" ] else [ p ]
   ) replayPhases;
@@ -340,6 +462,30 @@ stdenv.mkDerivation (
     inherit pname version;
     src = sandboxedResult;
     phases = [ "unpackPhase" "dyndrvCdToBuildDir" ] ++ finalReplayPhases;
+    # PREPENDED (not appended) to `replay`'s own `postInstall`, and
+    # crucially runs INSIDE `installPhase` itself -- `postInstall` is a
+    # hook, called via `runHook postInstall` as `installPhase`'s own
+    # LAST statement, strictly BEFORE the NEXT phase in `phases` ever
+    # runs (the synthesized `dyndrvRestoreOutput` phase below). Without
+    # this, any caller-supplied `postInstall` that reads/writes `$out`
+    # directly (`wrapProgram $out/bin/...`, `substituteInPlace
+    # "$out"/...`) finds it still missing whatever `make install` wrote
+    # under the placeholder root -- confirmed via real nixpkgs `mosh`
+    # ("Cannot wrap ... because it does not exist") and `leveldb`
+    # ("substitute(): ERROR: file ... does not exist"), see `docs/
+    # split-postinstall-before-restore-bug.md` for the full writeup.
+    # Running this SAME logic again in `dyndrvRestoreOutput` (below) is
+    # a safe, idempotent no-op once this hook has already emptied
+    # `dyndrvPlaceholderOut`.
+    #
+    # ONLY `dyndrvCopyPlaceholderScript`, deliberately NOT
+    # `dyndrvMultioutSplitScript` -- see that script's own header
+    # comment above for why running the multi-output split THIS early
+    # (before a caller's own `postInstall` content runs) is itself a
+    # DIFFERENT bug, confirmed via real leveldb's `postInstall` reading
+    # `$out/lib/cmake` before the split would have relocated it to
+    # `$dev/lib/cmake`.
+    postInstall = dyndrvCopyPlaceholderScript + (replay.postInstall or "");
     # `replay`'s own inherited `sourceRoot` (if the ORIGINAL package set
     # one) must be explicitly CLEARED here, not just left unset in THIS
     # attrset -- `replay // {...}` never REMOVES a key `replay` itself
@@ -563,58 +709,8 @@ stdenv.mkDerivation (
     '';
     dyndrvRestoreOutput = ''
       runHook preDyndrvRestoreOutput
-      if [ -d ${dyndrvPlaceholderOut} ]; then
-        mkdir -p "$out"
-        cp -r ${dyndrvPlaceholderOut}/. "$out"/
-        chmod -R u+w "$out"
-        rm -rf ${dyndrvPlaceholderOut}
-        # Everything just landed under the single `$out` root, since
-        # phase 1 (where these paths were baked in) only ever had ONE
-        # output -- for a real multi-output package, nixpkgs' own
-        # `_multioutDevs`/`_multioutDocs` (declared by
-        # `multiple-outputs.sh`, unconditionally sourced by stdenv, so
-        # always available as plain bash functions here regardless of
-        # whether THIS package opted into multiple outputs) must run
-        # NOW, before anything else, to redistribute `$out`'s content
-        # across the real outputs -- confirmed necessary by direct
-        # reproduction against real freetype: leaving this to the
-        # ORDINARY `preFixupHooks` array (which already contains these
-        # same functions) is NOT reliable, since a caller's OWN
-        # `nativeBuildInputs` can register another `preFixupHooks` entry
-        # (freetype's own `flatten-include-hack-hook`) that happens to
-        # run first and expects `$dev/include` to already exist --
-        # confirmed this exact ordering failure by direct reproduction
-        # ("cd: .../include: No such file or directory"). Calling these
-        # explicitly here, unconditionally, makes the split happen
-        # deterministically before ANY other `preFixupHook` gets a
-        # chance to run, matching what an ordinary (non-accelerated)
-        # build's own install-time behavior already guaranteed for free.
-        # Both are no-ops (their own top-line `getAllOutputNames`/`-z`
-        # checks) when `outputs` is just `"out"`.
-        _multioutDocs
-        _multioutDevs
-      fi
-      # `dyndrvPhase1Out` (see `dyndrvCdToBuildDir` above) is only set
-      # for a meson build -- `meson install`'s own `$DESTDIR` PREPENDS
-      # itself onto the baked-in prefix rather than substituting for
-      # it, so the real content is sitting at `$out$dyndrvPhase1Out`
-      # (a literal string concatenation -- both `$out` and
-      # `$dyndrvPhase1Out` are absolute paths in their own right, e.g.
-      # `$out` == `/nix/store/AAAA-nix-util-2.36.0pre` and
-      # `$dyndrvPhase1Out` == `/nix/store/BBBB-nix-util-2.36.0pre.drv`,
-      # giving the nested `/nix/store/AAAA-.../nix/store/BBBB-...`)
-      # rather than directly under `$out` itself -- hoist it up one
-      # level, the same way the autotools-specific restore step above
-      # does for its own differently-shaped baked path.
-      if [ -n "''${dyndrvPhase1Out:-}" ] && [ -d "$out$dyndrvPhase1Out" ]; then
-        dyndrvHoistTmp="$out/.dyndrv-hoist-tmp"
-        mkdir -p "$dyndrvHoistTmp"
-        cp -r "$out$dyndrvPhase1Out"/. "$dyndrvHoistTmp"/
-        rm -rf "''${out:?}''${dyndrvPhase1Out:?}"
-        cp -r "$dyndrvHoistTmp"/. "$out"/
-        rm -rf "$dyndrvHoistTmp"
-        chmod -R u+w "$out"
-      fi
+      ${dyndrvCopyPlaceholderScript}
+      ${dyndrvMultioutSplitScript}
       runHook postDyndrvRestoreOutput
     '';
     unpackPhase = ''
