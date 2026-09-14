@@ -770,6 +770,70 @@ in
           case "$a" in
             /*) continue ;;
           esac
+          # `a` can be a `-`-prefixed FLAG, not a real path at all --
+          # confirmed necessary by direct reproduction against real
+          # nixpkgs libwebp (cmake+ninja's own generated link line):
+          # `-Wl,--dependency-file=CMakeFiles/webpdecoder.dir/link.d`
+          # is ONE glued argv token, and without this check the loop
+          # below computed ITS OWN literal dirname (`-Wl,--dependency-
+          # file=CMakeFiles/webpdecoder.dir`, the flag's own text minus
+          # its last path segment) instead of the REAL relative
+          # directory the linker actually needs
+          # (`CMakeFiles/webpdecoder.dir`) -- the genuinely-needed
+          # directory was never created at all, so `ld.bfd` failed
+          # outright ("cannot open dependency file CMakeFiles/
+          # webpdecoder.dir/link.d: No such file or directory"). This
+          # was ORIGINALLY misdiagnosed (in `~/overlay`'s own libwebp/
+          # leveldb/brotli/libssh survey findings) as `discoverTree`
+          # itself misstaging multi-subdirectory cmake source trees --
+          # confirmed by direct reproduction that the REAL cause is
+          # here instead, one level later than `discoverTree` (this
+          # loop runs AFTER it, over the SAME raw, unfiltered argv).
+          # `-Wl,`-glued flags still need their OWN embedded path
+          # extracted (unglue on `,` the same way the input-file scan
+          # above already does, then take the part after `=` for an
+          # `--option=value`-shaped sub-flag like `--dependency-file=`)
+          # -- every OTHER `-`-prefixed flag has no real path to
+          # extract at all and is skipped outright.
+          case "$a" in
+            -Wl,*)
+              dyndrvOutOrig="$a"
+              _dyndrv_wlRest="''${a#-Wl,}"
+              while [ -n "$_dyndrv_wlRest" ]; do
+                case "$_dyndrv_wlRest" in
+                  *,*) _dyndrv_wlTok="''${_dyndrv_wlRest%%,*}"; _dyndrv_wlRest="''${_dyndrv_wlRest#*,}" ;;
+                  *) _dyndrv_wlTok="$_dyndrv_wlRest"; _dyndrv_wlRest="" ;;
+                esac
+                case "$_dyndrv_wlTok" in
+                  *=*) a="''${_dyndrv_wlTok#*=}" ;;
+                  *) a="$_dyndrv_wlTok" ;;
+                esac
+                case "$a" in
+                  -*|/*|"") continue ;;
+                esac
+                dyndrvOutK=0
+                dyndrvOutRest="$a"
+                while :; do
+                  case "$dyndrvOutRest" in
+                    ../*) dyndrvOutK=$((dyndrvOutK + 1)); dyndrvOutRest="''${dyndrvOutRest#../}" ;;
+                    *) break ;;
+                  esac
+                done
+                dyndrvOutNestLevels=$((dyndrvUpDepth - dyndrvOutK))
+                [ "$dyndrvOutNestLevels" -lt 0 ] && continue
+                dyndrvOutNestPrefix=""
+                dyndrvOutI=0
+                while [ "$dyndrvOutI" -lt "$dyndrvOutNestLevels" ]; do
+                  dyndrvOutNestPrefix="$dyndrvOutNestPrefix$dyndrvUpDirName/"
+                  dyndrvOutI=$((dyndrvOutI + 1))
+                done
+                ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$treeDir/$dyndrvOutNestPrefix$dyndrvOutRest")"
+              done
+              a="$dyndrvOutOrig"
+              continue
+              ;;
+            -*) continue ;;
+          esac
           dyndrvOutK=0
           dyndrvOutRest="$a"
           while :; do
