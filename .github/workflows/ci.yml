@@ -11,6 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # ubuntu-latest (24.04) restricts unprivileged user-namespace
+      # creation via AppArmor by default, which is exactly what Nix's
+      # build sandbox needs -- every build against a diverted store
+      # (this repo's own `--store "local?root=..."`, used throughout
+      # `try-it-out/run-nix.sh`/`nix/tests/run-tests.sh` to avoid the
+      # system nix-daemon's fixed experimental-features) fails outright
+      # with "this system does not support the kernel namespaces that
+      # are required for sandboxing, which is required for building in
+      # a diverted store" -- confirmed this is a CI-environment
+      # regression (a runner-image default change), not anything this
+      # repo's own code controls; same root cause and same fix nixgg's
+      # own CI already uses (see ~/nixgg/.github/workflows/smoke.yml).
+      # Known, still-open upstream gap:
+      # https://github.com/DeterminateSystems/nix-installer-action/issues/193.
+      - name: Allow unprivileged user namespaces (Nix sandbox needs this on ubuntu-latest)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
