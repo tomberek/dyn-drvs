@@ -12,6 +12,17 @@ jobs:
   test-builder-rpc-v0:
     name: Tests (builder-rpc-v0, via try-it-out/run-nix.sh)
     runs-on: ubuntu-latest
+    # `pull-requests: write` -- the default token this repo's Actions
+    # settings grant is read-only for `pull_request` events, confirmed
+    # by direct reproduction: the "Comment trynix.dev preview link" step
+    # below built the link successfully but couldn't post it ("a fork's
+    # token cannot write" -- misleading message from `trynix`'s own
+    # action; the ACTUAL cause here was this SAME-repo PR's token simply
+    # lacking write scope, not a fork). Explicitly requesting it here
+    # overrides the repo-level default for this workflow only.
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
