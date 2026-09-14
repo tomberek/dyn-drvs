@@ -30,6 +30,22 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 
       - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          # `devshell-parity-test.sh`/`devshell-parity-smalllib-test.sh`/
+          # `cross-mode-reuse.sh` connect to the AMBIENT system nix-daemon
+          # directly (via `nix/lib/shim/devShell.nix`'s `Rpc`-mode
+          # wrappers -- the whole point of that mode is running OUTSIDE
+          # any sandbox/diverted-store), unlike `try-it-out/run-nix.sh`'s
+          # own explicit `--extra-experimental-features` flags on a
+          # SEPARATE patched-Nix + diverted store -- so the ambient
+          # daemon itself needs `ca-derivations`/`dynamic-derivations`
+          # enabled, which a per-invocation CLI flag can't retroactively
+          # grant to an already-running daemon. Confirmed necessary by
+          # direct reproduction: without this, `devshell-parity-test.sh`
+          # failed with "experimental Nix feature 'ca-derivations' is
+          # disabled."
+          extra-conf: |
+            extra-experimental-features = nix-command flakes ca-derivations dynamic-derivations recursive-nix
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       # Fetches/builds a pinned real NixOS/nix commit (see
