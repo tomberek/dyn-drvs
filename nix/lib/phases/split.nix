@@ -407,11 +407,25 @@ stdenv.mkDerivation (
     dyndrvCdToBuildDir = ''
       runHook preDyndrvCdToBuildDir
       # `.dyndrv-build-relpath` (see `shim.collectStubs`'s own header
-      # comment) exists IFF phase 1 found a `build.ninja` -- i.e. this
-      # was an out-of-source, meson-style build whose own
-      # `configurePhase` `cd`ed one level BELOW `sourceRoot` before
-      # `buildPhase` ever ran (meson's own `mesonConfigurePhase` setup-
-      # hook: `meson setup build && cd build`). Its CONTENT is phase
+      # comment) is now written UNCONDITIONALLY by phase 1, for every
+      # package regardless of build system -- not gated on meson's own
+      # `build.ninja` marker, as this used to be (confirmed necessary by
+      # direct reproduction against real nixpkgs `capnproto`, cmake+
+      # make: cmake's own generated `Makefile` re-invokes `cmake
+      # --check-build-system` against the ABSOLUTE source directory
+      # baked into `CMakeCache.txt` during phase 1's `configurePhase`,
+      # which the old meson-only gate never reconstructed at all,
+      # failing at `installPhase` with `CMake Error: The source
+      # directory "/build/source" does not exist` even after every real
+      # compile/link had already succeeded). For the common case (phase
+      # 1 never `cd`ed anywhere beyond its own build root at all --
+      # every plain-Makefile/autotools package proven so far), its own
+      # CONTENT is simply `"."` -- a pure no-op, skipped entirely below,
+      # since there's nothing to relocate.
+      #
+      # For an out-of-source build (meson's own `mesonConfigurePhase`
+      # setup-hook: `meson setup build && cd build`; cmake's own
+      # `cmakeConfigurePhase`, same convention), its CONTENT is phase
       # 1's own absolute build-dir path, relative to `NIX_BUILD_TOP`
       # (e.g. "source/src/libutil/build") -- reconstructing this EXACT
       # SAME absolute position here (both sandboxes fix `NIX_BUILD_TOP`
@@ -429,8 +443,18 @@ stdenv.mkDerivation (
       # "for free," with no per-file special-casing needed at all.
       if [ -f .dyndrv-build-relpath ]; then
         dyndrvRelpath=$(cat .dyndrv-build-relpath)
-        dyndrvParentRelpath=$(dirname "$dyndrvRelpath")
         rm -f .dyndrv-build-relpath
+        # `dyndrvRelpath == "."` (the common case, see above) means
+        # phase 1's own build root ALREADY IS `NIX_BUILD_TOP` -- nothing
+        # to relocate at all. Confirmed necessary by direct reproduction:
+        # without this guard, `mv .dyndrv-tmp-root "."` fails outright
+        # ("'.dyndrv-tmp-root' and './.dyndrv-tmp-root' are the same
+        # file") the moment the relpath is trivially `.` itself, since
+        # `.dyndrv-tmp-root` (staged one level under the CURRENT
+        # directory) and its own move target (`.`, that SAME current
+        # directory) resolve to the identical path.
+        if [ "$dyndrvRelpath" != "." ]; then
+        dyndrvParentRelpath=$(dirname "$dyndrvRelpath")
         # Stage everything into a TEMP holder first, then relocate that
         # holder in one atomic `mv` -- `dyndrvRelpath` can be MULTIPLE
         # segments deep (e.g. "source/src/libutil/build"), and
@@ -510,6 +534,7 @@ stdenv.mkDerivation (
             { skip = 0; print }
           ' build.ninja > build.ninja.dyndrv-tmp
           mv build.ninja.dyndrv-tmp build.ninja
+        fi
         fi
       fi
       # `.dyndrv-phase1-out` (see `shim.collectStubs`'s own header

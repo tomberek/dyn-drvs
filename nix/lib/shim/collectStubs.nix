@@ -717,6 +717,28 @@ in
     for _dcs_p in "''${dyndrv_stubPaths[@]}"; do
       ${pkgs.coreutils}/bin/rm -f "$dyndrv_origTree/$_dcs_p"
     done
+    # Phase 1's own absolute cwd, relative to `NIX_BUILD_TOP` (already
+    # computed above as `dyndrv_buildRootTop`, for the UNRELATED cwd-
+    # relative-path-frame reconciliation) -- written here UNCONDITIONALLY
+    # (not gated on meson's own `build.ninja` marker, as this used to
+    # be) so `phases/split.nix`'s own phase 2 can ALWAYS reconstruct
+    # this exact same absolute position, regardless of which build
+    # system generated phase 1's build state. Confirmed necessary by
+    # direct reproduction against real nixpkgs `capnproto` (cmake+make,
+    # no meson involved at all): cmake's own generated `Makefile`
+    # re-invokes `cmake --check-build-system` against the ABSOLUTE
+    # source directory baked into `CMakeCache.txt` during phase 1's
+    # `configurePhase` (`CMAKE_HOME_DIRECTORY`) -- with the old meson-
+    # only gate, phase 2 never reconstructed that position at all,
+    # failing at `installPhase` with `CMake Error: The source directory
+    # "/build/source" does not exist` even though every real compile
+    # and link had ALREADY succeeded. `dyndrvCdToBuildDir` (the
+    # consumer, `phases/split.nix`) treats a `"."` relpath (the common
+    # case: phase 1 never `cd`ed anywhere beyond `dyndrv_buildRoot`
+    # itself) as a pure no-op, so writing this unconditionally is safe
+    # for every OTHER already-proven package too, not just meson's own
+    # out-of-source convention.
+    printf '%s' "$dyndrv_buildRootTop" > "$dyndrv_origTree/.dyndrv-build-relpath"
     # meson (and similarly out-of-tree build systems) reference SOURCE-
     # tree files/directories one level ABOVE the build dir via literal
     # "../<path>" tokens throughout build.ninja -- both as an edge's
@@ -752,9 +774,69 @@ in
     # whether it needs to reconstruct the one-level-up nesting at all
     # (a plain, non-meson build never produces one, so this is purely
     # additive there).
-    if [ -f "$dyndrv_buildRoot/build.ninja" ]; then
+    if [ -f "$dyndrv_buildRoot/build.ninja" ] || [ -f "$dyndrv_buildRoot/CMakeCache.txt" ]; then
       dyndrv_carriedDir="$dyndrv_origTree/.dyndrv-carried-up1"
       dyndrv_buildAbs=$(${pkgs.coreutils}/bin/realpath "$dyndrv_buildRoot")
+    fi
+    if [ -f "$dyndrv_buildRoot/CMakeCache.txt" ]; then
+      # `CMAKE_HOME_DIRECTORY` (`CMakeCache.txt`'s own record of the
+      # SOURCE dir cmake was invoked against) distinguishes cmake's
+      # out-of-tree convention (`cmakeConfigurePhase`'s default `mkdir
+      # -p build; cd build`: `CMAKE_HOME_DIRECTORY` is `dyndrv_buildRoot`'s
+      # own PARENT) from an in-source build (`dontUseCmakeBuildDir =
+      # true`, example-18's own fixture: `CMAKE_HOME_DIRECTORY` IS
+      # `dyndrv_buildRoot` itself, cmake invoked directly from the
+      # source dir with no separate `build/` subdir at all) --
+      # confirmed necessary by direct reproduction: without this
+      # check, the carry-forward below unconditionally tried to copy
+      # `dyndrv_buildRoot`'s own PARENT DIRECTORY (in-source: that's
+      # `$NIX_BUILD_TOP` itself, which nests `dyndrv_buildRoot`
+      # directly) INTO a subdirectory of `dyndrv_origTree`, which
+      # itself lives under a `mktemp -d` scratch dir ALSO directly
+      # under `$NIX_BUILD_TOP` -- `cp -r` then tried to copy that
+      # scratch dir into itself ("cp: cannot copy a directory ... into
+      # itself"), since the source and destination trees overlapped.
+      dyndrv_cmakeHome=$(${pkgs.gnused}/bin/sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dyndrv_buildRoot/CMakeCache.txt")
+      dyndrv_cmakeHomeAbs=$(${pkgs.coreutils}/bin/realpath -m "$dyndrv_cmakeHome")
+      if [ "$dyndrv_cmakeHomeAbs" != "$dyndrv_buildAbs" ]; then
+      # cmake's own out-of-tree convention (`cmakeConfigurePhase`'s
+      # `mkdir -p build; cd build`, the SAME one-level-up nesting
+      # meson's own `meson setup build && cd build` uses) puts the
+      # ENTIRE source tree (`CMakeLists.txt`, every `.c`/`.h`, any
+      # subdirectory `add_subdirectory()` references) one level ABOVE
+      # `dyndrv_buildRoot`, with NO equivalent of meson's own
+      # `build.ninja`/`intro-install_plan.json` machine-readable
+      # dependency listing to scan instead -- cmake's generated
+      # `Makefile`s reference these sources via bare, ALREADY-ABSOLUTE
+      # paths (confirmed by direct reproduction: `CMakeFiles/prog.dir/
+      # build.make`'s own compile rule reads straight from
+      # `$dyndrv_buildAbs/../main.c`, no relative `"../"` token to grep
+      # for at all), so the precise text/JSON-scan approach meson needs
+      # doesn't even apply here. Carrying forward the WHOLE parent
+      # directory's contents (everything sitting alongside
+      # `dyndrv_buildRoot` itself, i.e. every sibling of the build dir)
+      # is simpler and just as correct: cmake's own convention never
+      # puts real source content ANYWHERE else, and this is exactly
+      # the same one-level-up nesting `phases/split.nix`'s own
+      # `dyndrvCdToBuildDir` already reconstructs via `.dyndrv-carried-
+      # up1` for meson -- confirmed necessary by direct reproduction
+      # against a synthetic cmake+make fixture: without this, phase
+      # 2's tree contains ONLY `dyndrv_buildRoot`'s own content (the
+      # `build/` dir), so `cmake --check-build-system`'s own re-
+      # invocation at install time fails outright ("The source
+      # directory ... does not appear to contain CMakeLists.txt").
+      dyndrv_buildParentAbs=$(${pkgs.coreutils}/bin/dirname "$dyndrv_buildAbs")
+      dyndrv_buildBasename=$(${pkgs.coreutils}/bin/basename "$dyndrv_buildAbs")
+      ${pkgs.coreutils}/bin/mkdir -p "$dyndrv_carriedDir"
+      for _dcs_sib in "$dyndrv_buildParentAbs"/* "$dyndrv_buildParentAbs"/.[!.]*; do
+        [ -e "$_dcs_sib" ] || continue
+        _dcs_sibName=$(${pkgs.coreutils}/bin/basename "$_dcs_sib")
+        [ "$_dcs_sibName" = "$dyndrv_buildBasename" ] && continue
+        ${pkgs.coreutils}/bin/cp -r "$_dcs_sib" "$dyndrv_carriedDir/$_dcs_sibName"
+      done
+      fi
+    fi
+    if [ -f "$dyndrv_buildRoot/build.ninja" ]; then
       while IFS= read -r _dcs_rel; do
         [ -z "$_dcs_rel" ] && continue
         case "$_dcs_rel" in
@@ -884,18 +966,12 @@ in
       # own installer then finds a symlink at that exact path pointing
       # nowhere real relative to ITS OWN understanding of where things
       # are, and refuses to install it ("Tried to install something
-      # that isn't a file"). Rather than special-casing every ONE of
-      # these separately-baked-absolute-path files (unbounded, since
-      # any future meson version could bake another), record phase 1's
-      # OWN absolute cwd, relative to `NIX_BUILD_TOP` (always `/build`
-      # in every sandbox, phase 1's and phase 2's alike, confirmed by
-      # direct reproduction) -- so `phases/split.nix`'s own phase 2 can
-      # reconstruct that EXACT SAME absolute position instead of a
-      # synthetic one, making every one of these baked-absolute
-      # references correct "for free," with no per-file special-casing
-      # needed at all.
-      ${pkgs.coreutils}/bin/realpath --relative-to="''${NIX_BUILD_TOP:-/build}" "$dyndrv_buildRoot" \
-        > "$dyndrv_origTree/.dyndrv-build-relpath"
+      # that isn't a file"). This is now handled generically by the
+      # UNCONDITIONAL `.dyndrv-build-relpath` write above (right after
+      # `dyndrv_origTree` is created) -- meson is simply the tool that
+      # first surfaced the need for it, not the only one that needs it
+      # (see that write's own comment for why it's no longer gated on
+      # `build.ninja`).
       # meson's own `--prefix=$out` (baked in at CONFIGURE time, phase
       # 1) is NEVER overridden by a fresh `$out` at install time --
       # unlike autotools/make (`make install DESTDIR=...`), `meson

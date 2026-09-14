@@ -38,15 +38,16 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-22 are the
+      # via two separate attr-path invocations. Examples 17-24 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus two follow-up
-      # argv-shape-classification regressions (compile+link-in-one-step,
-      # and `-MT`/`-MF` values misidentified as the source file), each
-      # confirmed failing before its own fix and passing after -- see
-      # each file's own header comment for
-      # the exact bug it guards against.
+      # phase-dropping, `finalAttrs.finalPackage`) plus three follow-up
+      # argv-shape/phase-ordering regressions (compile+link-in-one-step,
+      # `-MT`/`-MF` values misidentified as the source file, `ar`/
+      # `ranlib` probe-invocation crashes, and cmake+make's own out-of-
+      # tree install failure), each confirmed failing before its own fix
+      # and passing after -- see each file's own header comment for the
+      # exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
           inherit pkgs;
@@ -74,6 +75,7 @@
           example-21 = import ./try-it-out/examples/21-accelerate-compile-and-link-one-step.nix { inherit pkgs; };
           example-22 = import ./try-it-out/examples/22-accelerate-mt-mf-absolute-source.nix { inherit pkgs; };
           example-23 = import ./try-it-out/examples/23-accelerate-ar-ranlib-probe.nix { inherit pkgs; };
+          example-24 = import ./try-it-out/examples/24-accelerate-cmake-make-outoftree.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 
