@@ -261,6 +261,25 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   stable release includes it yet, so most installed Nix binaries don't
   have it out of the box; `try-it-out/patched-nix.nix` fetches one
   directly, or use `capabilities.withFallback` to degrade to IFD.
+- **cmake-driven builds can fail per-TU compiles with a source-not-found
+  error** — confirmed on `xxhash` (out-of-tree `cmakeDir`) and `re2`
+  (cmake+ninja); root cause not yet fully isolated. See
+  `docs/discovertree-cmake-source-path-bug.md`.
+- **A freshly-linked binary can lose its execute bit**, breaking any
+  package whose build script runs its own just-built binary before
+  `installPhase` (e.g. `libb64`'s Makefile-driven self-test). See
+  `docs/discovertree-exec-bit-bug.md`.
+- **`phases.split` forces `outputs = ["out"]` but doesn't clear a stale
+  `outputBin`/`outputMan`/`outputDev` literal override**, breaking any
+  package whose recipe sets one of those explicitly (e.g. `libpng`,
+  `libtasn1`: both set `outputBin = "dev"`) with `_assignFirst: could
+  not find a non-empty variable`. See
+  `docs/split-outputbin-override-bug.md`.
+- **Secondary compiler side-outputs (`-MD`/`-MF` depfiles) don't survive
+  the sandbox boundary** — automake's classic `-MF .deps/$*.Tpo` + `mv`
+  depcomp idiom fails immediately after every real compile succeeds,
+  since only the primary `-o` output is tracked. Confirmed on `gperf`.
+  See `docs/depfile-side-output-bug.md`.
 
 See `docs/upstream-tracking.md` for which of these trace back to a
 specific NixOS/nix issue, rather than being a `dyndrv`-side gap.

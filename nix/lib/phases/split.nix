@@ -126,6 +126,17 @@
   version,
   stdenv,
   sandboxed,
+  # The LAST phase name in this list marks where phase 1 stops -- NOT a
+  # complete, static phase list to run verbatim (see `sandboxedDrv`'s own
+  # `buildCommand` header comment below for why: nixpkgs' own dynamic
+  # `$phases` computation, which a setup hook like `autoreconfHook`
+  # extends via `appendToVar preConfigurePhases autoreconfPhase`, must
+  # still run, or that hook's own injected phase is silently dropped).
+  # Default matches stdenv's own standard phase ORDER up through
+  # `buildPhase` (nothing here needs to be exhaustive -- only the LAST
+  # entry, `buildPhase`, is actually consulted as the truncation
+  # boundary; the earlier entries exist only for this attrset's own
+  # documentation value).
   sandboxedPhases ? [
     "unpackPhase"
     "patchPhase"
@@ -149,6 +160,10 @@
 
 let
   useCompiledCollect = dyndrvShim != null;
+
+  # The single phase name phase 1 stops AT (inclusive) -- see
+  # `sandboxedPhases`'s own doc comment above.
+  lastSandboxedPhase = lib.last sandboxedPhases;
 
   # A fixed, `/build`-relative placeholder path -- see this file's own
   # "WHY UNDER `/build`, NOT `/nonexistent`" header comment above for why
@@ -195,7 +210,50 @@ let
     sandboxed
     // {
       inherit name;
-      phases = sandboxedPhases ++ [ "collectPhase" ];
+      # NOT a static `phases = sandboxedPhases ++ [...]` override (what
+      # this used to be) -- that sets the derivation's own `phases` env
+      # var directly, which is ALREADY non-empty by the time nixpkgs'
+      # own `setup.sh`'s `definePhases` runs (`if [ -z "${phases[*]:-}"
+      # ]`), so its dynamic computation (which incorporates whatever a
+      # setup hook `appendToVar preConfigurePhases`/`preBuildPhases`/etc.
+      # into) never runs at all -- confirmed by direct reproduction
+      # against real nixpkgs `mosh` (`autoreconfHook`): with the static
+      # override, `configurePhase` logged "no configure script, doing
+      # nothing" even though `autoreconfHook`'s own `appendToVar
+      # preConfigurePhases autoreconfPhase` DID run (setup hooks run
+      # unconditionally, before ANY phase), because its own injected
+      # `autoreconfPhase` name was silently absent from the STATIC
+      # `phases` list this override forced. `buildCommand` (below) is
+      # the stdenv-recognized escape hatch that skips `genericBuild`'s
+      # own default body ENTIRELY (`setup.sh`: `if [ -n
+      # "${buildCommand:-}" ]; then eval "$buildCommand"; return; fi`),
+      # letting us call the SAME `definePhases`/`runPhase` primitives
+      # nixpkgs' own `genericBuild` uses, get the REAL dynamically-
+      # computed phase list (now correctly including `autoreconfPhase`
+      # or any other setup-hook-injected phase), then truncate it at the
+      # `lastSandboxedPhase` boundary before appending `collectPhase` --
+      # preserving every phase a real, unaccelerated build would have
+      # run up to that point, dynamically injected ones included.
+      buildCommand = ''
+        definePhases
+        dyndrvTruncatedPhases=""
+        dyndrvFoundBoundary=0
+        for dyndrvPhase in ''${phases[*]}; do
+          dyndrvTruncatedPhases="$dyndrvTruncatedPhases $dyndrvPhase"
+          if [ "$dyndrvPhase" = ${lib.escapeShellArg lastSandboxedPhase} ]; then
+            dyndrvFoundBoundary=1
+            break
+          fi
+        done
+        if [ "$dyndrvFoundBoundary" != 1 ]; then
+          echo "dyndrv.phases.split: sandboxedPhases' last entry '${lastSandboxedPhase}' never appears in the dynamically computed phase list ($phases) -- check sandboxedPhases against the real phase names this package's own setup hooks produce" >&2
+          exit 1
+        fi
+        phases="$dyndrvTruncatedPhases collectPhase"
+        for curPhase in ''${phases[*]}; do
+          runPhase "$curPhase"
+        done
+      '';
       requiredSystemFeatures = (sandboxed.requiredSystemFeatures or [ ]) ++ [ "builder-rpc-v0" ];
       # ALWAYS single-output, regardless of what the wrapped package
       # itself declares (`sandboxed` may be a real package's own attrset,

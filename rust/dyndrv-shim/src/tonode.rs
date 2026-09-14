@@ -62,7 +62,11 @@ fn extra_store_paths(argv: &[String]) -> Vec<String> {
 /// fixed: token 0 is the modifiers string, token 1 the archive path,
 /// everything after is a positional object-file input. ALWAYS defers --
 /// no passthrough case (see that file's own header comment).
-pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str) -> Decision {
+///
+/// `cwd`: this invocation's own cwd, relative to `NIX_BUILD_TOP` (see
+/// `wrapper::invocation_cwd`'s own doc comment) -- `""`/`"."` for the
+/// common case (invocation cwd IS the package build root).
+pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str, cwd: &str) -> Decision {
     let modifiers = argv[0].clone();
     let mut args_for_ar = vec![modifiers, "$out".to_string()];
     args_for_ar.extend(argv[2..].iter().cloned());
@@ -78,11 +82,22 @@ pub fn ar_to_node(argv: &[String], real_ar: &str, bintools_basename: &str) -> De
             srcs,
             setup_cmd: None,
             chdir: None,
+            cwd: normalize_cwd(cwd),
             chained_from: None,
             seed_from: None,
         },
         output_arg: Some(1),
         output_path: None,
+    }
+}
+
+/// `""`/`"."` (the common case) normalizes to `None`, matching
+/// `mkAcceleratedStdenv.nix`'s own `invocationCwd` normalization.
+fn normalize_cwd(cwd: &str) -> Option<String> {
+    if cwd.is_empty() || cwd == "." {
+        None
+    } else {
+        Some(cwd.to_string())
     }
 }
 
@@ -116,6 +131,7 @@ pub fn ranlib_to_node(
     real_ranlib: &str,
     bintools_basename: &str,
     coreutils_basename: &str,
+    cwd: &str,
 ) -> Decision {
     let archive_idx = argv.len() - 1;
     let real_archive_path = argv[archive_idx].clone();
@@ -148,6 +164,7 @@ pub fn ranlib_to_node(
             srcs,
             setup_cmd: None,
             chdir: None,
+            cwd: normalize_cwd(cwd),
             chained_from: None,
             seed_from: Some(SeedFrom {
                 from: real_archive_path,

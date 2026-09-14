@@ -236,12 +236,30 @@ let
           *) return 1 ;;
         esac
       }
+      # `isCMakeProbe`: see `toNode`'s own matching `isCMakeProbe` comment
+      # for the full rationale -- CMake's own `try_compile`-backed probes
+      # (`check_c_compiler_flag`/etc.) universally `cd` into a `CMakeFiles/
+      # CMakeScratch/TryCompile-<random>/` subdirectory before invoking
+      # the compiler there, so this checks THIS INVOCATION'S OWN CWD
+      # (`$DYNDRV_INVOCATION_CWD`, exported by `wrapCommand.nix`'s own
+      # discoverTree-mode wrapper for the unrelated cwd-relative-path-
+      # frame fix, reused here), NOT argv text -- `wrapCommand.nix`'s own
+      # `stripPwdPrefix` strips this exact absolute cwd prefix from every
+      # relative argv element before this function ever sees it, so the
+      # marker never survives there.
+      is_cmake_probe=0
+      case "''${DYNDRV_INVOCATION_CWD:-}" in
+        *CMakeFiles/CMakeScratch/TryCompile-*) is_cmake_probe=1 ;;
+      esac
 
       is_probe=0
       if [ -n "$source_path" ] && is_conftest "$source_path"; then
         is_probe=1
       fi
       if [ "$out_idx" != -1 ] && is_conftest "$out_val"; then
+        is_probe=1
+      fi
+      if [ "$is_cmake_probe" = 1 ]; then
         is_probe=1
       fi
 
@@ -423,14 +441,28 @@ let
   discoverTree = ''
     args=""
     skip_next=0
+    has_c_flag=0
     for a in "$@"; do
       if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
       case "$a" in
-        -c|-MMD|-MD|-MP) continue ;;
+        -c) has_c_flag=1; continue ;;
+        -MMD|-MD|-MP) continue ;;
         -o|-MF|-MT|-MQ) skip_next=1; continue ;;
         *) args="$args $a" ;;
       esac
     done
+    # A link invocation (no `-c`) has no headers to discover -- `cc
+    # <objs> -M -MG` treats every `.o`/`.a` positional arg as "unused
+    # linker input" and prints nothing anyway (confirmed by direct
+    # reproduction), so running the scan at all is wasted work every
+    # single link step pays for no benefit. Skipping it here doesn't fix
+    # the real link-step dependency-loss bug on its own (that's a
+    # cwd-relative-path-frame mismatch, fixed via `DYNDRV_INVOCATION_CWD`
+    # -- see `wrapCommand.nix`'s own header comment) -- this is purely an
+    # efficiency fix for a scan that could never have succeeded here.
+    if [ "$has_c_flag" = 0 ]; then
+      exit 0
+    fi
     ${realCc} $args -M -MG 2>/dev/null \
       | tr -d '\\' \
       | tr ' ' '\n' \
@@ -541,6 +573,33 @@ let
       # by inspecting argv structure -- only the NAME reliably signals
       # "this is a throwaway probe, not part of the real build graph".
       isConftest = a: a != null && hasPrefix "conftest" (builtins.baseNameOf a);
+      # SECOND passthrough signal, for CMake's own equivalent mechanism:
+      # `check_c_compiler_flag`/`check_cxx_compiler_flag`/`check_c_source_
+      # compiles`/`check_function_exists`/etc. all funnel through CMake's
+      # own `try_compile`, which UNIVERSALLY `cd`s into a `CMakeFiles/
+      # CMakeScratch/TryCompile-<random>/` subdirectory BEFORE invoking
+      # the real compiler/linker there (confirmed directly against a real
+      # `check_c_compiler_flag` probe) -- checked via THIS INVOCATION'S
+      # OWN CWD (`DYNDRV_INVOCATION_CWD`, exported by `wrapCommand.nix`
+      # for the unrelated cwd-relative-path-frame fix, reused here), NOT
+      # argv text: `wrapCommand.nix`'s own `stripPwdPrefix` pass strips
+      # this exact absolute cwd prefix from every relative argv element
+      # BEFORE `toNode` ever sees it (e.g. `src.c`, not `CMakeFiles/
+      # CMakeScratch/TryCompile-.../src.c`), so scanning `sourcePath`/
+      # `positionalArgs`/`out_val` for the substring -- `isConftest`'s own
+      # convention -- can never match; the marker only ever survives in
+      # the invocation's own cwd, never in its (now-relative) argv.
+      # Distinct from `isConftest`'s BASENAME-only convention (autoconf
+      # never nests under a directory named this way). Without this, a
+      # deferred stub for one of these probes always "succeeds" (exit
+      # 0), which can falsely enable a compiler flag/feature CMake never
+      # actually verified support for (confirmed against real nixpkgs
+      # zstd: `-Qunused-arguments`, a Clang-only flag, got baked into
+      # every real compile's own `CMAKE_C_FLAGS` after its own
+      # `check_c_compiler_flag` probe wrongly "succeeded" against gcc).
+      isCMakeProbe =
+        let cwd = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in
+        builtins.match ".*CMakeFiles/CMakeScratch/TryCompile-.*" cwd != null;
       hasSuffix = suffix: str:
         let
           sl = builtins.stringLength suffix;
@@ -581,7 +640,8 @@ let
         || isInfoQuery
         || isConftest sourcePath
         || builtins.any isConftest positionalArgs
-        || (outIdx != (-1) && isConftest (builtins.elemAt argv (outIdx + 1)));
+        || (outIdx != (-1) && isConftest (builtins.elemAt argv (outIdx + 1)))
+        || isCMakeProbe;
     in
     # PASSTHROUGH for any probe invocation -- see `isProbe` above. These
     # need to run for real, synchronously, since either the calling
@@ -643,6 +703,18 @@ let
         treeUpDirName =
           let v = builtins.getEnv "DYNDRV_TREE_UPDIRNAME"; in if v == "" then ".dyndrv-cwd" else v;
         chdir = builtins.concatStringsSep "" (builtins.genList (_: "''${treeUpDirName}/") treeUpDepth);
+
+        # This invocation's own cwd, relative to `NIX_BUILD_TOP` -- see
+        # `wrapCommand.nix`'s own header comment on `DYNDRV_INVOCATION_
+        # CWD` for the full rationale (a link step run from a different
+        # cwd than the compile step that produced one of its `.o` inputs
+        # needs this to reconcile the two invocations' own different
+        # relative-path frames). `"."` (the common case: invocation cwd
+        # == package build root) is normalized to `""` here so
+        # `collectStubs.nix`'s own join logic can treat "no cwd field"
+        # and "cwd is the build root" identically.
+        invocationCwd =
+          let v = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in if v == "." then "" else v;
 
         # nixpkgs' own cc-wrapper/bintools-wrapper setup hooks inject
         # extra compiler flags via ENV VARS (`NIX_CFLAGS_COMPILE`,
@@ -920,6 +992,7 @@ let
               setupCmd = "''${wrapperEnvExports}${pkgs.coreutils}/bin/cp -r ''${builtins.storeDir}/''${treeBasename}/. . && ${pkgs.coreutils}/bin/chmod -R u+w . &&";
             }
             // (if chdir != "" then { inherit chdir; } else { })
+            // (if invocationCwd != "" then { cwd = invocationCwd; } else { })
           );
         };
       }
@@ -946,21 +1019,30 @@ let
       modifiers = builtins.elemAt argv 0;
       inputs = builtins.genList (i: builtins.elemAt argv (i + 2)) (len - 2);
       argvForAr = [ modifiers "$out" ] ++ inputs;
+      # See `wrapCommand.nix`'s own header comment on
+      # `DYNDRV_INVOCATION_CWD` -- `ar` can run from a different cwd
+      # than the compiles that produced its own `.o` inputs, the exact
+      # same reconciliation `ccToNode`'s own `invocationCwd` needs.
+      invocationCwd =
+        let v = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in if v == "" || v == "." then "" else v;
     in
     {
       defer = {
-        record = builtins.toJSON {
-          key = null;
-          tool = "${realAr}";
-          args = argvForAr;
-          # `stdenv.cc.bintools.bintools` (the package `realAr` lives in)
-          # must be declared here -- confirmed necessary by direct
-          # reproduction against a real freetype build: an empty `srcs`
-          # left the sandbox with no `ar` binary mounted at all ("ar: not
-          # found"), since nothing else in the merged unit's own record
-          # chain happened to reference it.
-          srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
-        };
+        record = builtins.toJSON (
+          {
+            key = null;
+            tool = "${realAr}";
+            args = argvForAr;
+            # `stdenv.cc.bintools.bintools` (the package `realAr` lives in)
+            # must be declared here -- confirmed necessary by direct
+            # reproduction against a real freetype build: an empty `srcs`
+            # left the sandbox with no `ar` binary mounted at all ("ar: not
+            # found"), since nothing else in the merged unit's own record
+            # chain happened to reference it.
+            srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
+          }
+          // (if invocationCwd != "" then { cwd = invocationCwd; } else { })
+        );
       };
       outputArg = 1;
     }
@@ -1044,21 +1126,27 @@ let
       argvForRanlib = builtins.genList (
         i: if i == archiveIdx then "$out" else builtins.elemAt argv i
       ) len;
+      # See `arToNode`'s own matching comment on `invocationCwd`.
+      invocationCwd =
+        let v = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in if v == "" || v == "." then "" else v;
     in
     {
       defer = {
-        record = builtins.toJSON {
-          key = null;
-          tool = "${realRanlib}";
-          args = argvForRanlib;
-          # Same "the tool's own store path must be declared as a src"
-          # requirement as `arToNode` above -- `ranlib` shares the same
-          # `bintools` package as `ar`, so this is the same input, just
-          # declared independently since `ranlib`'s own record may be
-          # rendered without `ar`'s (e.g. chained standalone) and each
-          # record's `srcs` must be self-sufficient.
-          srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
-        };
+        record = builtins.toJSON (
+          {
+            key = null;
+            tool = "${realRanlib}";
+            args = argvForRanlib;
+            # Same "the tool's own store path must be declared as a src"
+            # requirement as `arToNode` above -- `ranlib` shares the same
+            # `bintools` package as `ar`, so this is the same input, just
+            # declared independently since `ranlib`'s own record may be
+            # rendered without `ar`'s (e.g. chained standalone) and each
+            # record's `srcs` must be self-sufficient.
+            srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
+          }
+          // (if invocationCwd != "" then { cwd = invocationCwd; } else { })
+        );
       };
       outputArg = archiveIdx;
     }
@@ -1191,7 +1279,23 @@ else
       fpargs:
       let
         rattrs = if builtins.isFunction fpargs then fpargs else (_: fpargs);
-        args = rattrs (args // { inherit overrideAttrs; });
+        # `finalPackage`: the self-reference nixpkgs' own real `stdenv.
+        # mkDerivation`/`make-derivation.nix` injects via the IDENTICAL
+        # mechanism (`args = rattrs (args // { inherit finalPackage
+        # overrideAttrs; });`, `finalPackage = mkDerivationSimple
+        # overrideAttrs args;`) -- confirmed necessary by direct
+        # reproduction against real, unmodified openssl: its own recipe
+        # reads `finalAttrs.finalPackage.doCheck` at 3 call sites (e.g.
+        # deciding whether to skip a check-only patch), and this
+        # accelerator's own hand-rolled fixed point never provided it at
+        # all, failing outright with "attribute 'finalPackage' missing"
+        # at EVAL time, before phase 1 ever runs. Bound to `result`
+        # below (this function's own eventual return value) -- Nix's
+        # laziness allows the self-reference the same way `args`'s own
+        # self-reference already works, since neither `overrideAttrs`
+        # nor `result`'s own construction needs to force `args`/`result`
+        # eagerly.
+        args = rattrs (args // { inherit finalPackage overrideAttrs; });
         overrideAttrs =
           f0:
           mkDerivation (
@@ -1209,28 +1313,31 @@ else
             in
             prev // thisOverlay
           );
+        result =
+          assert
+            args ? pname && args ? version
+            || throw "dyndrv.accelerate.mkAcceleratedStdenv: mkDerivation call must set pname/version (phases.split needs both to name phase 1's own inner derivation) -- name-only calls aren't supported yet";
+          self.phases.split {
+            inherit stdenv nixPackage dyndrvShim;
+            inherit (args) pname version;
+            sandboxed = args // {
+              nativeBuildInputs = [ wrapperDir ] ++ (args.nativeBuildInputs or [ ]);
+              CC = "${wrapperDir}/bin/cc";
+              CXX = "${wrapperDir}/bin/c++";
+              AR = "${wrapperDir}/bin/ar";
+              RANLIB = "${wrapperDir}/bin/ranlib";
+            }
+            // lib.optionalAttrs (granularity == "module") {
+              DYNDRV_BATCH_GROUPS = builtins.toJSON (batchGroupOfAttrs args.src);
+            };
+            replay = args;
+          }
+          // {
+            inherit overrideAttrs;
+          };
+        finalPackage = result;
       in
-      assert
-        args ? pname && args ? version
-        || throw "dyndrv.accelerate.mkAcceleratedStdenv: mkDerivation call must set pname/version (phases.split needs both to name phase 1's own inner derivation) -- name-only calls aren't supported yet";
-      self.phases.split {
-        inherit stdenv nixPackage dyndrvShim;
-        inherit (args) pname version;
-        sandboxed = args // {
-          nativeBuildInputs = [ wrapperDir ] ++ (args.nativeBuildInputs or [ ]);
-          CC = "${wrapperDir}/bin/cc";
-          CXX = "${wrapperDir}/bin/c++";
-          AR = "${wrapperDir}/bin/ar";
-          RANLIB = "${wrapperDir}/bin/ranlib";
-        }
-        // lib.optionalAttrs (granularity == "module") {
-          DYNDRV_BATCH_GROUPS = builtins.toJSON (batchGroupOfAttrs args.src);
-        };
-        replay = args;
-      }
-      // {
-        inherit overrideAttrs;
-      };
+      result;
   in
   # `stdenv // { mkDerivation = ...; }`, NOT a fresh `{ inherit stdenv;
   # ...; }` attrset -- the RETURNED value must still carry every real

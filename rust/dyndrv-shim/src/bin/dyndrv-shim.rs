@@ -46,8 +46,8 @@ fn main() -> anyhow::Result<()> {
         "ar" => {
             let bintools_basename =
                 std::env::var("DYNDRV_BINTOOLS_BASENAME").context("DYNDRV_BINTOOLS_BASENAME")?;
-            run_plain(&client, &real_command, &argv, mode, |rewritten| {
-                ar_to_node(rewritten, &real_command, &bintools_basename)
+            run_plain(&client, &real_command, &argv, mode, |rewritten, cwd| {
+                ar_to_node(rewritten, &real_command, &bintools_basename, cwd)
             })
         }
         "ranlib" => {
@@ -55,8 +55,8 @@ fn main() -> anyhow::Result<()> {
                 std::env::var("DYNDRV_BINTOOLS_BASENAME").context("DYNDRV_BINTOOLS_BASENAME")?;
             let coreutils_basename = std::env::var("DYNDRV_COREUTILS_BASENAME")
                 .context("DYNDRV_COREUTILS_BASENAME")?;
-            run_plain(&client, &real_command, &argv, mode, |rewritten| {
-                ranlib_to_node(rewritten, &real_command, &bintools_basename, &coreutils_basename)
+            run_plain(&client, &real_command, &argv, mode, |rewritten, cwd| {
+                ranlib_to_node(rewritten, &real_command, &bintools_basename, &coreutils_basename, cwd)
             })
         }
         "cc" => {
@@ -74,7 +74,7 @@ fn main() -> anyhow::Result<()> {
                 &argv,
                 mode,
                 |argv| discover_tree(argv, &real_command),
-                |argv, tree_basename, tree_up_depth| {
+                |argv, tree_basename, tree_up_depth, cwd| {
                     cc_to_node(
                         argv,
                         &real_command,
@@ -83,6 +83,7 @@ fn main() -> anyhow::Result<()> {
                         tree_basename,
                         tree_up_depth,
                         &batch_groups,
+                        cwd,
                     )
                 },
             )

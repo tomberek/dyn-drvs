@@ -16,6 +16,22 @@ fn is_conftest(path: &str) -> bool {
     basename(path).starts_with("conftest")
 }
 
+/// Port of `toNode`'s own `isCMakeProbe` (`mkAcceleratedStdenv.nix`) --
+/// see that file's own header comment for the full rationale. CMake's
+/// own `try_compile`-backed probes (`check_c_compiler_flag`/etc.)
+/// universally `cd` into a `CMakeFiles/CMakeScratch/TryCompile-<random>/`
+/// subdirectory before invoking the compiler there -- checked via THIS
+/// INVOCATION'S OWN CWD (the `invocation_cwd` parameter, see `wrapper::
+/// invocation_cwd`'s own doc comment), NOT argv text: `wrapper::run_
+/// discover_tree`'s own `strip_pwd_prefix` pass strips this exact
+/// absolute cwd prefix from every relative argv element before this
+/// function ever sees it, so the marker never survives in `sourcePath`/
+/// `positionalArgs`/`out_val` -- only in the cwd itself.
+fn is_cmake_probe(cwd: &str) -> bool {
+    cwd.contains("CMakeFiles/CMakeScratch/TryCompile-")
+}
+
+
 /// Port of `ccToNodeBash`'s own `dyndrv_env_prefix` computation
 /// (`mkAcceleratedStdenv.nix`) -- see that file's own header comment
 /// for the full rationale (nixpkgs' cc-wrapper/bintools-wrapper setup
@@ -122,6 +138,9 @@ fn extra_store_paths(argv: &[String]) -> Vec<String> {
 /// resolves correctly.
 /// `batch_groups`: `{ <relative-source-path> = <group-key> }`, mirrors
 /// `DYNDRV_BATCH_GROUPS`.
+/// `invocation_cwd`: this invocation's own cwd, relative to `NIX_BUILD_
+/// TOP` (see `wrapper::invocation_cwd`'s own doc comment) -- `""`/`"."`
+/// for the common case (invocation cwd IS the package build root).
 pub fn cc_to_node(
     argv: &[String],
     real_cc: &str,
@@ -130,6 +149,7 @@ pub fn cc_to_node(
     tree_basename: &str,
     tree_up_depth: usize,
     batch_groups: &std::collections::HashMap<String, String>,
+    invocation_cwd: &str,
 ) -> Decision {
     let has_compile_flag = argv.iter().any(|a| a == "-c");
 
@@ -186,7 +206,7 @@ pub fn cc_to_node(
         None
     };
 
-    let mut is_probe = source_path.is_some_and(is_conftest);
+    let mut is_probe = source_path.is_some_and(is_conftest) || is_cmake_probe(invocation_cwd);
     if let Some(ov) = out_val {
         if is_conftest(ov) {
             is_probe = true;
@@ -318,6 +338,11 @@ pub fn cc_to_node(
         srcs,
         setup_cmd: Some(setup_cmd),
         chdir,
+        cwd: if invocation_cwd.is_empty() || invocation_cwd == "." {
+            None
+        } else {
+            Some(invocation_cwd.to_string())
+        },
         chained_from: None,
         seed_from: None,
     };

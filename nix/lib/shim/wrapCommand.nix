@@ -399,6 +399,31 @@ in
           fi
         done
 
+        # This invocation's own cwd, relative to `NIX_BUILD_TOP` (stable
+        # across the WHOLE sandboxed build, confirmed by direct
+        # reproduction -- see `collectStubs.nix`'s own matching comment
+        # on `.dyndrv-build-relpath`) -- exported so `toNode`/
+        # `toNodeBash` can record it on `record.cwd`. Needed because a
+        # build tool routinely `cd`s into a subdirectory (e.g. cmake's
+        # generated `cd build && cc CMakeFiles/.../a.o ... -o exe`)
+        # BEFORE invoking this wrapper, so a link step's own relative
+        # argv (e.g. "CMakeFiles/.../a.o") and the EARLIER compile
+        # step's own discovered stub path (relative to `collectStubs`'
+        # fixed `buildRoot`, e.g. "build/CMakeFiles/.../a.o") are two
+        # DIFFERENT strings for the identical real file -- without
+        # recording each invocation's own cwd offset, `collectStubs`'
+        # plain string comparison between a record's own `args` and its
+        # discovered stub paths can never connect the two, silently
+        # dropping the dependency edge (confirmed by direct reproduction:
+        # a nested, cwd-changing repro reproduces `ld.bfd: cannot find
+        # CMakeFiles/.../a.o`, while the identical repro with NO cwd
+        # change between producer and consumer succeeds). Pure string
+        # arithmetic (`-m`), not a real filesystem check -- `origPwd`
+        # always exists, but this mirrors the same primitive used
+        # elsewhere for the same reason.
+        dyndrvInvocationCwd=$(${pkgs.coreutils}/bin/realpath -m --relative-to="''${NIX_BUILD_TOP:-/build}" "$origPwd")
+        export DYNDRV_INVOCATION_CWD="$dyndrvInvocationCwd"
+
         # Rewrite any argv element that's a path to an EXISTING regular
         # file not already under /nix/store into its real store path
         # first: a real build's source files (e.g. `cc -c a.c -o a.o`)
@@ -532,6 +557,15 @@ in
         # `argv` here is now relative wherever the original was
         # absolute-but-under-$PWD -- genuinely absolute paths (real store
         # paths) are unchanged.
+
+        # See this file's OTHER `discoverTree == null` branch's own
+        # matching comment on `DYNDRV_INVOCATION_CWD` above -- same
+        # reason (a link step's own cwd, e.g. cmake's `cd build && cc
+        # ...`, routinely differs from an earlier compile step's cwd
+        # that produced one of its `.o` inputs), same mechanism.
+        dyndrvInvocationCwd=$(${pkgs.coreutils}/bin/realpath -m --relative-to="''${NIX_BUILD_TOP:-/build}" "$origPwd")
+        export DYNDRV_INVOCATION_CWD="$dyndrvInvocationCwd"
+
         argvJson=$(printf '%s\n' "$@" | ${pkgs.jq}/bin/jq -R -s 'split("\n") | .[:-1]')
         # `"$@"` is already the relevant form here (this variant never
         # substitutes real store paths in place of source files the way

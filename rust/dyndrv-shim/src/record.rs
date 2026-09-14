@@ -31,6 +31,16 @@ pub struct Record {
     /// chain at all).
     #[serde(rename = "chdir", default, skip_serializing_if = "Option::is_none")]
     pub chdir: Option<String>,
+    /// This record's own invocation cwd, relative to `NIX_BUILD_TOP` --
+    /// port of `mkAcceleratedStdenv.nix`'s own `invocationCwd` field
+    /// (see `wrapper.rs`'s own doc comment on `invocation_cwd` for the
+    /// full rationale: a link step run from a different cwd than the
+    /// compile step that produced one of its `.o` inputs needs this to
+    /// reconcile the two invocations' own different relative-path
+    /// frames). `None` for the common case (invocation cwd IS the
+    /// package build root).
+    #[serde(rename = "cwd", default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(rename = "chainedFrom", default, skip_serializing_if = "Option::is_none")]
     pub chained_from: Option<String>,
     /// Names an EARLIER dependency (an args-equivalent reference,

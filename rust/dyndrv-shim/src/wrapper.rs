@@ -22,6 +22,51 @@ pub fn strip_pwd_prefix(s: &str, orig_pwd: &str) -> String {
     s.to_string()
 }
 
+/// This invocation's own cwd, relative to `NIX_BUILD_TOP` -- port of
+/// `wrapCommand.nix`'s own `DYNDRV_INVOCATION_CWD` computation. Needed
+/// because a build tool routinely `cd`s into a subdirectory (e.g.
+/// cmake's generated `cd build && cc CMakeFiles/.../a.o ... -o exe`)
+/// BEFORE invoking this wrapper, so a link step's own relative argv
+/// (e.g. "CMakeFiles/.../a.o") and an EARLIER compile step's own
+/// discovered stub path (relative to `dyndrv-collect`'s fixed
+/// `buildRoot`) can be two DIFFERENT strings for the identical real
+/// file. `collect.rs`'s own `discover_stubs`/dependency-scan does the
+/// actual reconciliation (converting this value from `NIX_BUILD_TOP`-
+/// relative to `buildRoot`-relative before joining against a record's
+/// own `args`) -- this function only ever captures the raw value.
+/// `NIX_BUILD_TOP` defaults to "/build", matching the bash oracle's own
+/// default.
+pub fn invocation_cwd(orig_pwd: &str) -> String {
+    let build_top = std::env::var("NIX_BUILD_TOP").unwrap_or_else(|_| "/build".to_string());
+    pathdiff_lexical(&build_top, orig_pwd)
+}
+
+/// Lexical (string-only, no filesystem check) equivalent of `realpath -m
+/// --relative-to=<from> <to>` -- both `from`/`to` are assumed absolute,
+/// slash-separated. Collapses leading common segments the same way
+/// `collectStubs.nix`'s own `dyndrv_relative_between` does.
+fn pathdiff_lexical(from: &str, to: &str) -> String {
+    let from_segs: Vec<&str> = from.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let to_segs: Vec<&str> = to.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let common = from_segs
+        .iter()
+        .zip(to_segs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut result: Vec<&str> = Vec::new();
+    for _ in common..from_segs.len() {
+        result.push("..");
+    }
+    for seg in &to_segs[common..] {
+        result.push(seg);
+    }
+    if result.is_empty() {
+        ".".to_string()
+    } else {
+        result.join("/")
+    }
+}
+
 /// Runs the plain (non-`discoverTree`) wrapper pipeline for one
 /// intercepted invocation: strip-pwd-prefix every argv element, rewrite
 /// any existing-relative-file element to its own store path (skipping
@@ -31,9 +76,10 @@ pub fn strip_pwd_prefix(s: &str, orig_pwd: &str) -> String {
 /// variant, minus the `nix-instantiate`/`jq` spawns it needed.
 ///
 /// `decide`: closure implementing this tool's own `toNode`/`toNodeBash`
-/// equivalent, given the REWRITTEN argv. `mode`: decided once by
-/// `crate::mode::detect()` in the entrypoint, threaded in here rather
-/// than re-detected per call.
+/// equivalent, given the REWRITTEN argv and this invocation's own
+/// `invocation_cwd` (see that function's own doc comment). `mode`:
+/// decided once by `crate::mode::detect()` in the entrypoint, threaded
+/// in here rather than re-detected per call.
 pub fn run_plain<F>(
     client: &BuilderRpcClient,
     real_command: &str,
@@ -42,12 +88,13 @@ pub fn run_plain<F>(
     decide: F,
 ) -> anyhow::Result<()>
 where
-    F: FnOnce(&[String]) -> Decision,
+    F: FnOnce(&[String], &str) -> Decision,
 {
     let orig_pwd = std::env::current_dir()
         .context("run_plain: current_dir")?
         .display()
         .to_string();
+    let cwd = invocation_cwd(&orig_pwd);
 
     let stripped: Vec<String> = orig_argv
         .iter()
@@ -60,7 +107,7 @@ where
         .collect::<anyhow::Result<Vec<_>>>()
         .context("run_plain: rewrite_argv_element")?;
 
-    match decide(&rewritten) {
+    match decide(&rewritten, &cwd) {
         Decision::Passthrough => {
             // PASSTHROUGH execs with the ORIGINAL argv (not rewritten,
             // not stripped) -- `realCommand` needs the real relative
@@ -120,9 +167,11 @@ where
 /// names directly.
 /// `decide`: closure implementing `cc`'s own decision logic, given the
 /// RAW argv (unmodified -- `discoverTree` mode's whole point), the
-/// freshly-staged tree's own store basename, and the nested "cwd"
-/// depth (see `stage_tree`'s own doc comment) this invocation's own
-/// paths needed the tree staged at -- `0` for the common case.
+/// freshly-staged tree's own store basename, the nested "cwd" depth
+/// (see `stage_tree`'s own doc comment) this invocation's own paths
+/// needed the tree staged at -- `0` for the common case -- and this
+/// invocation's own `invocation_cwd` (see that function's own doc
+/// comment).
 pub fn run_discover_tree<D, F>(
     client: &BuilderRpcClient,
     real_command: &str,
@@ -133,12 +182,13 @@ pub fn run_discover_tree<D, F>(
 ) -> anyhow::Result<()>
 where
     D: FnOnce(&[String]) -> Vec<String>,
-    F: FnOnce(&[String], &str, usize) -> Decision,
+    F: FnOnce(&[String], &str, usize, &str) -> Decision,
 {
     let orig_pwd = std::env::current_dir()
         .context("run_discover_tree: current_dir")?
         .display()
         .to_string();
+    let cwd = invocation_cwd(&orig_pwd);
 
     // `argv` here is relative wherever the original was
     // absolute-but-under-$PWD; genuinely absolute paths (real store
@@ -212,7 +262,7 @@ where
         .context("run_discover_tree: add_to_store_nar")?;
     std::fs::remove_dir_all(tree_dir.parent().unwrap_or(&tree_dir)).ok();
 
-    match decide(&argv, &tree_basename.to_string(), up_depth) {
+    match decide(&argv, &tree_basename.to_string(), up_depth, &cwd) {
         Decision::Passthrough => exec_passthrough(real_command, orig_argv),
         Decision::Defer {
             record,

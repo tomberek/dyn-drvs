@@ -38,7 +38,12 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations.
+      # via two separate attr-path invocations. Examples 17-20 are the
+      # regression fixtures for tasks #130-133 (cwd-relative-path-frame
+      # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
+      # phase-dropping, `finalAttrs.finalPackage`), each confirmed
+      # failing before its own fix and passing after -- see each file's
+      # own header comment for the exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
           inherit pkgs;
@@ -59,6 +64,10 @@
             (import ./try-it-out/examples/07-accelerate-real-package.nix { inherit pkgs; }).accelerated;
           example-07-patch-output =
             (import ./try-it-out/examples/07-accelerate-real-package.nix { inherit pkgs; }).patchOutput;
+          example-17 = import ./try-it-out/examples/17-accelerate-cwd-mismatch.nix { inherit pkgs; };
+          example-18 = import ./try-it-out/examples/18-accelerate-cmake-probe.nix { inherit pkgs; };
+          example-19 = import ./try-it-out/examples/19-accelerate-autoreconf.nix { inherit pkgs; };
+          example-20 = import ./try-it-out/examples/20-accelerate-final-package.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

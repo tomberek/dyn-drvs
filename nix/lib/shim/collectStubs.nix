@@ -189,6 +189,97 @@ let
       done
     }
   '';
+
+  # Joins a record's own `cwd` (relative to `NIX_BUILD_TOP` -- see
+  # `wrapCommand.nix`'s own header comment on `DYNDRV_INVOCATION_CWD`)
+  # with one of its own `args` entries (relative to THAT cwd), then
+  # normalizes the result onto the SAME `NIX_BUILD_TOP`-relative frame
+  # every discovered stub's own key already uses (Phase 1's `dyndrv_
+  # buildRoot`-relative scan) -- pure string path arithmetic (splits on
+  # "/", collapses ".." against the preceding non-".." segment, drops
+  # "."/empty segments), no filesystem check, since the argument may
+  # name a stub that doesn't exist as a real file yet. Reconciles the
+  # exact cwd-relative-path-frame mismatch that silently dropped a link
+  # step's own dependency on an earlier compile step run from a
+  # DIFFERENT cwd -- confirmed by direct reproduction: a cmake-style `cd
+  # build && cc CMakeFiles/.../a.o -o exe` link, where the compile that
+  # produced that `.o` ran from the package's own root instead, so the
+  # link's own `args` entry ("CMakeFiles/.../a.o") and the compile's own
+  # discovered stub key ("build/CMakeFiles/.../a.o") were two different
+  # strings for the identical real file. `cwd == ""` (the common case,
+  # every OTHER example/fixture this accelerator has been run against
+  # so far never needed this at all) is a pure identity join.
+  joinRelFn = ''
+    dyndrv_join_rel() {
+      local cwd="$1" rel="$2" joined
+      if [ -z "$cwd" ] || [ "$cwd" = "." ]; then
+        joined="$rel"
+      else
+        joined="$cwd/$rel"
+      fi
+      local -a parts result=()
+      IFS='/' read -r -a parts <<< "$joined"
+      local seg
+      for seg in "''${parts[@]}"; do
+        case "$seg" in
+          "" | ".") continue ;;
+          "..")
+            if [ "''${#result[@]}" -gt 0 ] && [ "''${result[-1]}" != ".." ]; then
+              unset 'result[-1]'
+            else
+              result+=("..")
+            fi
+            ;;
+          *) result+=("$seg") ;;
+        esac
+      done
+      local IFS='/'
+      printf '%s' "''${result[*]:-}"
+    }
+  '';
+
+  # Computes path B relative to path A, where BOTH are already relative
+  # to the SAME anchor (here, `NIX_BUILD_TOP`) -- pure segment-prefix
+  # arithmetic (drop the longest common leading-segment prefix, then
+  # `..` back out of whatever's left of A, followed by whatever's left
+  # of B), no filesystem check. Needed because `wrapCommand.nix`'s own
+  # `DYNDRV_INVOCATION_CWD` is captured relative to `NIX_BUILD_TOP` (the
+  # one anchor stable across the WHOLE sandboxed build -- see that
+  # file's own header comment), but `collectStubs`' own stub keys are
+  # relative to `dyndrv_buildRoot` specifically (usually a SUBDIRECTORY
+  # of `NIX_BUILD_TOP`, e.g. `/build/source` under `/build` -- `unpackPhase`
+  # creates it, it is NOT the sandbox root itself). Confirmed necessary
+  # by direct reproduction: without this step, an ORDINARY compile with
+  # no cwd mismatch at all (cwd == buildRoot) still got a non-empty
+  # `record.cwd` (e.g. "source", buildRoot's own offset from
+  # `NIX_BUILD_TOP`), corrupting `dyndrv_join_rel`'s join for every
+  # single invocation, not just the ones that actually need it -- a real
+  # regression against example 05's own baseline link step
+  # ("cannot find main.o"). Called once per record, converting its own
+  # `NIX_BUILD_TOP`-relative `cwd` into a `dyndrv_buildRoot`-relative one
+  # BEFORE `dyndrv_join_rel` ever runs, so stub keys and joined args
+  # references land on the exact same frame.
+  relativeBetweenFn = ''
+    dyndrv_relative_between() {
+      local from="$1" to="$2"
+      local -a fromSegs toSegs fromF=() toF=()
+      IFS='/' read -r -a fromSegs <<< "$from"
+      IFS='/' read -r -a toSegs <<< "$to"
+      local seg
+      for seg in "''${fromSegs[@]}"; do [ -n "$seg" ] && [ "$seg" != "." ] && fromF+=("$seg"); done
+      for seg in "''${toSegs[@]}"; do [ -n "$seg" ] && [ "$seg" != "." ] && toF+=("$seg"); done
+      local k=0
+      while [ "$k" -lt "''${#fromF[@]}" ] && [ "$k" -lt "''${#toF[@]}" ] && [ "''${fromF[$k]}" = "''${toF[$k]}" ]; do
+        k=$((k + 1))
+      done
+      local -a result=()
+      local i
+      for (( i = k; i < ''${#fromF[@]}; i++ )); do result+=(".."); done
+      for (( i = k; i < ''${#toF[@]}; i++ )); do result+=("''${toF[$i]}"); done
+      local IFS='/'
+      printf '%s' "''${result[*]:-}"
+    }
+  '';
 in
 {
   # The whole collection script. Callers append this to `buildPhase`,
@@ -204,8 +295,17 @@ in
     ${topoSortFn}
     ${placeholderBashFn}
     ${recordChainFn}
+    ${joinRelFn}
+    ${relativeBetweenFn}
 
     dyndrv_buildRoot=${lib.escapeShellArg buildRoot}
+    # `dyndrv_buildRoot`'s own position relative to `NIX_BUILD_TOP` --
+    # the anchor `wrapCommand.nix`'s own `DYNDRV_INVOCATION_CWD` is
+    # relative to (see that file's header comment). Pure string
+    # arithmetic, computed ONCE here rather than per-record, since every
+    # record's own `cwd` needs the SAME conversion before it can be
+    # compared against a stub key relative to `dyndrv_buildRoot`.
+    dyndrv_buildRootTop=$(${pkgs.coreutils}/bin/realpath -m --relative-to="''${NIX_BUILD_TOP:-/build}" "$dyndrv_buildRoot")
 
     # Phase 1: discover every stub under buildRoot; read each one's own
     # record path and `key` (empty/missing means "not opted into a batch
@@ -240,11 +340,31 @@ in
       _dcs_deps=""
       dyndrv_record_chain _dcs_chain "''${DYNDRV_STUB_RECORD[$_dcs_p]}"
       for _dcs_rec in "''${_dcs_chain[@]}"; do
+        _dcs_recCwd=$(${pkgs.jq}/bin/jq -r '.cwd // ""' "$_dcs_rec")
+        # Convert this record's own `cwd` (relative to `NIX_BUILD_TOP`,
+        # see `wrapCommand.nix`'s own header comment) into a `dyndrv_
+        # buildRoot`-relative one, matching the frame every discovered
+        # stub key already uses -- see `dyndrv_relative_between`'s own
+        # header comment for why this conversion is required even for
+        # the ordinary case (cwd == buildRoot), not just the mismatch
+        # case.
+        _dcs_recCwdRel=$(dyndrv_relative_between "$dyndrv_buildRootTop" "$_dcs_recCwd")
         while IFS= read -r _dcs_a; do
           [ -z "$_dcs_a" ] && continue
-          [ "$_dcs_a" = "$_dcs_p" ] && continue
-          if [ -n "''${DYNDRV_IS_STUB[$_dcs_a]:-}" ]; then
-            _dcs_deps="$_dcs_deps $_dcs_a"
+          # Join this arg against ITS OWN record's `cwd` (already
+          # converted to `dyndrv_buildRoot`-relative form above) before
+          # comparing against a discovered stub's own key -- both are
+          # then on the SAME frame, reconciling a link step's own args
+          # (relative to ITS cwd) with an earlier compile's own
+          # discovered stub path (relative to `dyndrv_buildRoot`) even
+          # when the two invocations ran from different directories. A
+          # no-op join when `cwd` is empty (the common case -- every
+          # OTHER example/fixture this accelerator has been run against
+          # so far never needed this at all).
+          _dcs_key=$(dyndrv_join_rel "$_dcs_recCwdRel" "$_dcs_a")
+          [ "$_dcs_key" = "$_dcs_p" ] && continue
+          if [ -n "''${DYNDRV_IS_STUB[$_dcs_key]:-}" ]; then
+            _dcs_deps="$_dcs_deps $_dcs_key"
           fi
         done < <(${pkgs.jq}/bin/jq -r '.args[]? | select(type == "string")' "$_dcs_rec")
       done
@@ -383,7 +503,7 @@ in
     # version of this function required.
     dyndrv_render_member() {
       local p="$1" ownOutVar="$2" u="$3"
-      local setupCmd="" cmdLine="" srcs="" tool thisSetupCmd thisChdir theseSrcs argsLine a rec
+      local setupCmd="" cmdLine="" srcs="" tool thisSetupCmd thisChdir thisCwd thisCwdRel theseSrcs argsLine a key rec
       local -a chain
       dyndrv_record_chain chain "''${DYNDRV_STUB_RECORD[$1]}"
       for rec in "''${chain[@]}"; do
@@ -391,12 +511,32 @@ in
           IFS= read -r tool
           IFS= read -r thisSetupCmd
           IFS= read -r thisChdir
+          IFS= read -r thisCwd
           IFS= read -r theseSrcs
+          # See Phase 2's own matching comment on `dyndrv_relative_
+          # between` -- converts THIS record's own `cwd` from `NIX_
+          # BUILD_TOP`-relative to `dyndrv_buildRoot`-relative BEFORE
+          # joining against any of its own `args`, required even in the
+          # ordinary (no mismatch) case since `dyndrv_buildRoot` is
+          # itself a subdirectory of `NIX_BUILD_TOP`, not `NIX_BUILD_TOP`
+          # itself.
+          thisCwdRel=$(dyndrv_relative_between "$dyndrv_buildRootTop" "$thisCwd")
           argsLine=""
           while IFS= read -r a; do
+            # Join against THIS record's own `cwd` (see `wrapCommand.
+            # nix`'s own header comment on `DYNDRV_INVOCATION_CWD`)
+            # before checking self-reference/stub-ness -- reconciles a
+            # link step's own `args` (relative to ITS cwd) with an
+            # earlier compile's own discovered stub path (relative to
+            # `dyndrv_buildRoot`), same as Phase 2's identical join. The
+            # ORIGINAL (unjoined) text `$a` is still what gets rendered
+            # for a non-stub reference below (`dyndrv_sq "$a"`) -- only
+            # the LOOKUP key changes, never the literal argv text a
+            # non-stub reference renders as.
+            key=$(dyndrv_join_rel "$thisCwdRel" "$a")
             if [ "$a" = '$out' ]; then
               argsLine="$argsLine $ownOutVar"
-            elif [ "$a" = "$p" ]; then
+            elif [ "$key" = "$p" ]; then
               # This argv element is a REFERENCE TO THIS SAME COMPILE'S
               # OWN OUTPUT PATH (e.g. `-MQ <objpath>` alongside `-o
               # <objpath>`, both naming the identical real path -- ninja/
@@ -417,11 +557,11 @@ in
               # checked BEFORE the generic `DYNDRV_IS_STUB` branch, which
               # would otherwise match this exact same case first.
               argsLine="$argsLine $ownOutVar"
-            elif [ -n "''${DYNDRV_IS_STUB[$a]:-}" ]; then
-              if [ "''${DYNDRV_UNIT_OF[$a]}" = "$u" ]; then
-                argsLine="$argsLine \$''${DYNDRV_OUTPUT_NAME[$a]}"
+            elif [ -n "''${DYNDRV_IS_STUB[$key]:-}" ]; then
+              if [ "''${DYNDRV_UNIT_OF[$key]}" = "$u" ]; then
+                argsLine="$argsLine \$''${DYNDRV_OUTPUT_NAME[$key]}"
               else
-                argsLine="$argsLine @dyndrv-node-placeholder:''${DYNDRV_UNIT_OF[$a]}:$a@"
+                argsLine="$argsLine @dyndrv-node-placeholder:''${DYNDRV_UNIT_OF[$key]}:$key@"
               fi
             else
               argsLine="$argsLine $(dyndrv_sq "$a")"
@@ -431,6 +571,7 @@ in
           (.tool),
           (.setupCmd // ""),
           (.chdir // ""),
+          (.cwd // ""),
           ((.srcs // []) | join("")),
           (.args[]? | select(type == "string"))
         ' "$rec")

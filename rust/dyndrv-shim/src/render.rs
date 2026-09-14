@@ -138,6 +138,24 @@ where
     for (i, rec) in stub.chain.iter().enumerate() {
         srcs.extend(rec.srcs.iter().cloned());
 
+        // Wraps `resolve_ref` so it's called with THIS record's own arg
+        // joined against its own `cwd` (already normalized to
+        // `build_root`-relative by `collect::discover_stubs` -- see
+        // that function's own doc comment), not the raw text --
+        // reconciles a link step's own `args` (relative to ITS cwd)
+        // with an earlier compile step's own discovered stub path
+        // (relative to `build_root`), mirroring `collectStubs.nix`'s
+        // own identical join. Scoped to THIS caller (`render_unit`'s
+        // own `unit_of`/self-reference lookups all expect a `build_
+        // root`-relative key) rather than folded into `render_record_
+        // line` itself, which is ALSO called by `drv.rs`/`drv_thunk.rs`/
+        // `group.rs` -- those callers' own `deps` maps are keyed by raw
+        // argv text (resolved via `stub::read_pending_symlink`, not a
+        // `build_root`-relative discovery pass), so joining there would
+        // corrupt an already-correct lookup.
+        let rec_cwd = rec.cwd.as_deref().unwrap_or("");
+        let joined_resolve_ref = |a: &str| resolve_ref(&crate::collect::join_rel(rec_cwd, a));
+
         // A `seed_from` reference (`ranlib_to_node`'s own "index this
         // archive in place" need) only applies to a STANDALONE,
         // non-chained invocation -- i.e. this is the FIRST record in
@@ -152,7 +170,7 @@ where
         // would wrongly substitute a per-member output token
         // (`$<sanitized-name>`) that's never actually set as an env var
         // for a solo unit's own `$out`.
-        let (setup, cmd) = render_record_line(rec, own_out_var, i == 0, &mut resolve_ref);
+        let (setup, cmd) = render_record_line(rec, own_out_var, i == 0, joined_resolve_ref);
         setup_cmd.push_str(&setup);
         cmd_line.push_str(&cmd);
     }
@@ -390,6 +408,7 @@ mod cross_mode_tests {
             srcs: vec!["xxx-gcc".to_string()],
             setup_cmd: None,
             chdir: None,
+            cwd: None,
             chained_from: None,
             seed_from: None,
         };
@@ -416,6 +435,7 @@ mod cross_mode_tests {
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
             chdir: None,
+            cwd: None,
             chained_from: None,
             seed_from: None,
         };
@@ -442,6 +462,7 @@ mod cross_mode_tests {
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
             chdir: None,
+            cwd: None,
             chained_from: None,
             seed_from: Some(SeedFrom {
                 from: "archive.a.drv".to_string(),
@@ -474,6 +495,7 @@ mod cross_mode_tests {
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
             chdir: None,
+            cwd: None,
             chained_from: None,
             seed_from: None,
         };
@@ -484,6 +506,7 @@ mod cross_mode_tests {
             srcs: vec!["xxx-binutils".to_string()],
             setup_cmd: None,
             chdir: None,
+            cwd: None,
             chained_from: None,
             // A CHAINED ranlib's own `seed_from.from` is the stub's OWN
             // self-referential relative-path text (see `render_member`'s

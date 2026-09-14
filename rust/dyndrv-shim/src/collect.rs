@@ -5,6 +5,67 @@ use harmonia_store_path::StorePath;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+/// Joins `cwd` (relative to `build_root`, already converted via
+/// `relative_between` -- see that function's own doc comment) with
+/// `rel` (relative to `cwd`), collapsing `..`/`.`/empty segments --
+/// port of `collectStubs.nix`'s own `dyndrv_join_rel`. Pure string path
+/// arithmetic, no filesystem check, since `rel` may name a stub that
+/// doesn't exist as a real file yet. `cwd == ""` (the common case) is a
+/// pure identity join.
+pub fn join_rel(cwd: &str, rel: &str) -> String {
+    let joined = if cwd.is_empty() || cwd == "." {
+        rel.to_string()
+    } else {
+        format!("{cwd}/{rel}")
+    };
+    let mut result: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => continue,
+            ".." => {
+                if result.last().is_some_and(|s| *s != "..") {
+                    result.pop();
+                } else {
+                    result.push("..");
+                }
+            }
+            _ => result.push(seg),
+        }
+    }
+    result.join("/")
+}
+
+/// Computes `to` relative to `from`, where BOTH are already relative to
+/// the SAME anchor (`NIX_BUILD_TOP`) -- port of `collectStubs.nix`'s own
+/// `dyndrv_relative_between`. Needed because `wrapper::invocation_cwd`
+/// captures a record's own `cwd` relative to `NIX_BUILD_TOP` (the one
+/// anchor stable across the whole sandboxed build), but `dyndrv-collect`'s
+/// own stub keys are relative to `build_root` specifically (usually a
+/// SUBDIRECTORY of `NIX_BUILD_TOP`, e.g. `/build/source` under `/build`
+/// -- `unpackPhase` creates it, it is NOT the sandbox root itself).
+/// Confirmed necessary by direct reproduction (matching the bash
+/// oracle's own fix): without this conversion, an ORDINARY compile with
+/// no cwd mismatch at all (cwd == build_root) still got a non-empty
+/// `record.cwd`, corrupting `join_rel`'s join for every single
+/// invocation, not just the ones that actually need it.
+pub fn relative_between(from: &str, to: &str) -> String {
+    let from_segs: Vec<&str> = from.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let to_segs: Vec<&str> = to.split('/').filter(|s| !s.is_empty() && *s != ".").collect();
+    let common = from_segs
+        .iter()
+        .zip(to_segs.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut result: Vec<&str> = Vec::new();
+    for _ in common..from_segs.len() {
+        result.push("..");
+    }
+    for seg in &to_segs[common..] {
+        result.push(seg);
+    }
+    result.join("/")
+}
+
 /// A discovered stub, keyed by its path relative to `buildRoot` -- port
 /// of `collectStubs.nix`'s Phase 1/2 discovery + dependency-scan, plus
 /// (task #85) `Sandbox` mode's own eager file-granularity representation.
@@ -55,6 +116,7 @@ fn read_record(path: &Path) -> Record {
         srcs: Vec::new(),
         setup_cmd: None,
         chdir: None,
+        cwd: None,
         chained_from: None,
         seed_from: None,
     })
@@ -125,6 +187,19 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
     let mut eager: BTreeMap<String, (StorePath, OutputName)> = BTreeMap::new();
     let mut is_stub = HashSet::new();
 
+    // `build_root`'s own position relative to `NIX_BUILD_TOP` -- the
+    // anchor `wrapper::invocation_cwd` captures each record's own `cwd`
+    // relative to (see that function's own doc comment). Computed ONCE
+    // here, since every record's own `cwd` needs the SAME conversion
+    // (via `relative_between`) before it can be compared against a stub
+    // key relative to `build_root`.
+    let build_top = std::env::var("NIX_BUILD_TOP").unwrap_or_else(|_| "/build".to_string());
+    let build_root_abs = std::fs::canonicalize(build_root)
+        .unwrap_or_else(|_| build_root.to_path_buf())
+        .display()
+        .to_string();
+    let build_root_top = relative_between(&build_top, &build_root_abs);
+
     for entry in walk_files(build_root) {
         let rel = entry
             .strip_prefix(build_root)
@@ -134,7 +209,19 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
         if let Some(record_path) = stub::read_batch_stub(&entry) {
             let head = read_record(&record_path);
             is_stub.insert(rel.clone());
-            chains.insert(rel, record_chain(head));
+            let mut chain = record_chain(head);
+            // Normalize each record's own `cwd` from `NIX_BUILD_TOP`-
+            // relative to `build_root`-relative IN PLACE here, once --
+            // every downstream consumer (this function's own dependency
+            // scan below, `render.rs`'s `render_member`) then only ever
+            // sees a `build_root`-relative `cwd`, needing no further
+            // `NIX_BUILD_TOP` awareness of its own.
+            for rec in &mut chain {
+                let rec_cwd = rec.cwd.as_deref().unwrap_or("");
+                let rec_cwd_rel = relative_between(&build_root_top, rec_cwd);
+                rec.cwd = if rec_cwd_rel.is_empty() { None } else { Some(rec_cwd_rel) };
+            }
+            chains.insert(rel, chain);
         } else if let Some(dep) = stub::read_pending_symlink(&entry) {
             is_stub.insert(rel.clone());
             eager.insert(rel, dep);
@@ -149,9 +236,11 @@ pub fn discover_stubs(build_root: &Path) -> BTreeMap<String, Stub> {
             .filter(|k| !k.is_empty());
         let mut deps = Vec::new();
         for rec in &chain {
+            let rec_cwd = rec.cwd.as_deref().unwrap_or("");
             for a in &rec.args {
-                if a != rel.as_str() && is_stub.contains(a) {
-                    deps.push(a.clone());
+                let key = join_rel(rec_cwd, a);
+                if key != rel && is_stub.contains(&key) {
+                    deps.push(key);
                 }
             }
         }
