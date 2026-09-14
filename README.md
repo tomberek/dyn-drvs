@@ -261,10 +261,19 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   stable release includes it yet, so most installed Nix binaries don't
   have it out of the box; `try-it-out/patched-nix.nix` fetches one
   directly, or use `capabilities.withFallback` to degrade to IFD.
-- **A freshly-linked binary can lose its execute bit**, breaking any
-  package whose build script runs its own just-built binary before
-  `installPhase` (e.g. `libb64`'s Makefile-driven self-test). See
-  `docs/discovertree-exec-bit-bug.md`.
+- **A package that self-execs its own just-linked/just-compiled binary
+  mid-`buildPhase` (before `installPhase` ever runs) is structurally
+  unsupported** — every intercepted `cc`/`ar` invocation defers
+  unconditionally (a plain placeholder text file, not real code) until
+  the whole-build-tree resolution pass runs once, at the very end of
+  `buildPhase`; a package whose own Makefile runs a just-built binary
+  as an inline "test" target (e.g. `libb64`) tries to execute that
+  still-unresolved placeholder and fails with `Permission denied`.
+  Confirmed this is NOT a lost-exec-bit bug (chmod'ing the placeholder
+  doesn't help; it isn't real code) and NOT fixable without an inline
+  "materialize now" mode, which `builder-rpc-v0` categorically cannot
+  support. A separate `checkPhase` (gated by `doCheck`, running AFTER
+  `buildPhase`) is unaffected. See `docs/discovertree-exec-bit-bug.md`.
 - **`phases.split` forces `outputs = ["out"]` but doesn't clear a stale
   `outputBin`/`outputMan`/`outputDev` literal override**, breaking any
   package whose recipe sets one of those explicitly (e.g. `libpng`,
