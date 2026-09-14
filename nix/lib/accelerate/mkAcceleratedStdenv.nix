@@ -1079,6 +1079,45 @@ let
       modifiers = builtins.elemAt argv 0;
       inputs = builtins.genList (i: builtins.elemAt argv (i + 2)) (len - 2);
       argvForAr = [ modifiers "$out" ] ++ inputs;
+      # Every one of `ar`'s own positional `.o`/archive INPUTS (never
+      # `argv[0]`'s modifiers string, never `$out`) is, by the time
+      # `toNode` sees it, ALREADY a real, resolved store path -- an
+      # earlier compile's own deferred output, substituted in place by
+      # `wrapCommand.nix`'s own `rewrittenArgs` step (`nix store
+      # add-file`, or simply left as-is if it was already an absolute
+      # `/nix/store/...` path) -- confirmed via direct reproduction
+      # against real nixpkgs openjpeg: `ar`'s own rendered argv
+      # literally reads `ar qc $out '/nix/store/<hash>-thread.c.o' ...`.
+      # `ccToNode`'s matching `extraStorePaths`/`findAllStorePaths` scan
+      # folds every such argv-embedded store path into the deferred
+      # record's own `srcs`, so the eventual registered derivation
+      # declares a REAL dependency edge on it -- `arToNode`/
+      # `ranlibToNode` never had an equivalent scan, so `srcs` here was
+      # ALWAYS just `stdenv.cc.bintools.bintools`'s own basename,
+      # regardless of how many real store-path inputs `argv` actually
+      # named. Confirmed necessary by direct reproduction: without this,
+      # the registered `ar` derivation's own `inputs.drvs`/`inputs.srcs`
+      # never referenced any of its 22 real `.o` inputs at all (`nix
+      # derivation show` confirms `inputs.drvs = {}`), so the sandbox
+      # had no access to them at build time ("ar: /nix/store/<hash>-
+      # thread.c.o: No such file or directory").
+      hasSuffix = suffix: str:
+        let
+          strLen = builtins.stringLength str;
+          sufLen = builtins.stringLength suffix;
+        in
+        strLen >= sufLen && builtins.substring (strLen - sufLen) sufLen str == suffix;
+      findAllStorePaths = s:
+        builtins.filter (p: !(hasSuffix ".drv" p)) (
+          builtins.concatMap (
+            x: if builtins.isList x then [ (builtins.elemAt x 0) ] else [ ]
+          ) (builtins.split "${builtins.storeDir}/([^/\"' ]+)" s)
+        );
+      extraStorePaths = builtins.attrNames (
+        builtins.listToAttrs (
+          map (n: { name = n; value = null; }) (builtins.concatMap findAllStorePaths inputs)
+        )
+      );
       # See `wrapCommand.nix`'s own header comment on
       # `DYNDRV_INVOCATION_CWD` -- `ar` can run from a different cwd
       # than the compiles that produced its own `.o` inputs, the exact
@@ -1101,8 +1140,13 @@ let
             # reproduction against a real freetype build: an empty `srcs`
             # left the sandbox with no `ar` binary mounted at all ("ar: not
             # found"), since nothing else in the merged unit's own record
-            # chain happened to reference it.
-            srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ];
+            # chain happened to reference it. `extraStorePaths` (see above)
+            # is the actual fix for task #141 -- without it, any `.o`/
+            # archive INPUT that's already a real, resolved store path
+            # (rather than a still-pending stub `shim.collectStubs`
+            # resolves via cross-unit substitution) was never declared as
+            # a dependency at all.
+            srcs = [ (builtins.baseNameOf "${stdenv.cc.bintools.bintools}") ] ++ extraStorePaths;
           }
           // (if invocationCwd != "" then { cwd = invocationCwd; } else { })
         );
