@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
 
+env:
+  CACHIX_CACHE: dynamicderivations
+
 jobs:
   test-builder-rpc-v0:
     name: Tests (builder-rpc-v0, via try-it-out/run-nix.sh)
@@ -46,6 +49,19 @@ jobs:
           # disabled."
           extra-conf: |
             extra-experimental-features = nix-command flakes ca-derivations dynamic-derivations recursive-nix
+
+      # Pull-only, no token needed -- works for fork PRs too, since the
+      # cache is public-readable (same cache `~/overlay`'s own CI already
+      # pushes/pulls, `dynamicderivations.cachix.org` -- see that repo's
+      # `.github/workflows/ci.yml`). Substitutes the fetched patched-Nix
+      # build and any dyndrv-* example/check this repo has already built
+      # before, cutting cold-CI time. Push (below) is separate and gated
+      # on secret access.
+      - uses: cachix/cachix-action@v15
+        with:
+          name: ${{ env.CACHIX_CACHE }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN || '' }}
+
       - uses: DeterminateSystems/magic-nix-cache-action@main
 
       # Fetches/builds a pinned real NixOS/nix commit (see
@@ -83,17 +99,18 @@ jobs:
       # `run-nix.sh`'s own `builder-rpc-v0` wrapping (it's designed to
       # work on stock Nix), but running it through the same loop is
       # harmless and keeps this step uniform. `example-17`/`-18`/`-19`/
-      # `-20` are the regression fixtures for the cwd-relative-path-
-      # frame mismatch, CMake compiler-flag-probe passthrough,
-      # `autoreconfHook` phase-dropping, and `finalAttrs.finalPackage`
-      # fixes respectively -- see each fixture's own header comment.
-      - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20)
+      # `-20`/`-21` are the regression fixtures for the cwd-relative-
+      # path-frame mismatch, CMake compiler-flag-probe passthrough,
+      # `autoreconfHook` phase-dropping, `finalAttrs.finalPackage`, and
+      # compile+link-in-one-step header discovery, respectively -- see
+      # each fixture's own header comment.
+      - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20/21)
         run: |
           for check in example-01 example-02 example-03-graph-of-two \
             example-03-graph-of-three example-03-graph-with-groups \
             example-03-graph-groupby-directory example-05 example-06 \
             example-07-accelerated example-07-patch-output \
-            example-17 example-18 example-19 example-20; do
+            example-17 example-18 example-19 example-20 example-21; do
             ./try-it-out/run-nix.sh build --impure --no-link \
               --print-out-paths ".#checks.x86_64-linux.$check"
           done
@@ -109,3 +126,37 @@ jobs:
 
       - name: cross-mode-reuse.sh (proves real substitution, not just hash agreement)
         run: ./rust/dyndrv-shim/cross-mode-reuse.sh
+
+      # Pushes everything this job just built to Cachix, so a later CI
+      # run (or a downstream consumer like `~/overlay`, which already
+      # substitutes from this SAME cache) doesn't have to rebuild it
+      # from scratch. Gated on secret access (same pattern `~/overlay`'s
+      # own CI already uses) so a fork PR -- which never has repo
+      # secrets -- skips this step instead of failing on a missing
+      # token. `NIX_REMOTE` (not a bare `cachix push`) is required here:
+      # every build in this job ran against `try-it-out/run-nix.sh`'s
+      # own ISOLATED store (`$DYNDRV_STORE`, default `/tmp/dyndrv-store`),
+      # never the real `/nix/store` -- `cachix push` resolves store paths
+      # through the same Nix store abstraction `nix-store`/`nix` do, so
+      # pointing it at the diverted store via `NIX_REMOTE` (the same env
+      # var `try-it-out/run-nix.sh`'s own `--store "local?root=..."`
+      # flag is equivalent to) makes it read from the right place.
+      - name: Push to Cachix
+        if: ${{ github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push' }}
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          NIX_REMOTE: local?root=/tmp/dyndrv-store
+        run: |
+          if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
+            echo "No CACHIX_AUTH_TOKEN secret configured -- skipping push."
+            exit 0
+          fi
+          for check in example-01 example-02 example-03-graph-of-two \
+            example-03-graph-of-three example-03-graph-with-groups \
+            example-03-graph-groupby-directory example-05 example-06 \
+            example-07-accelerated example-07-patch-output \
+            example-17 example-18 example-19 example-20 example-21; do
+            OUT=$(./try-it-out/run-nix.sh build --impure --no-link \
+              --print-out-paths ".#checks.x86_64-linux.$check" || true)
+            [[ -n "$OUT" ]] && echo "$OUT" | cachix push "$CACHIX_CACHE"
+          done
