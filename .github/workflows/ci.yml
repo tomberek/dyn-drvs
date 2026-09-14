@@ -127,36 +127,36 @@ jobs:
       - name: cross-mode-reuse.sh (proves real substitution, not just hash agreement)
         run: ./rust/dyndrv-shim/cross-mode-reuse.sh
 
-      # Pushes everything this job just built to Cachix, so a later CI
-      # run (or a downstream consumer like `~/overlay`, which already
-      # substitutes from this SAME cache) doesn't have to rebuild it
-      # from scratch. Gated on secret access (same pattern `~/overlay`'s
-      # own CI already uses) so a fork PR -- which never has repo
-      # secrets -- skips this step instead of failing on a missing
-      # token. `NIX_REMOTE` (not a bare `cachix push`) is required here:
-      # every build in this job ran against `try-it-out/run-nix.sh`'s
-      # own ISOLATED store (`$DYNDRV_STORE`, default `/tmp/dyndrv-store`),
-      # never the real `/nix/store` -- `cachix push` resolves store paths
-      # through the same Nix store abstraction `nix-store`/`nix` do, so
-      # pointing it at the diverted store via `NIX_REMOTE` (the same env
-      # var `try-it-out/run-nix.sh`'s own `--store "local?root=..."`
-      # flag is equivalent to) makes it read from the right place.
-      - name: Push to Cachix
+      # Pushes the ONE thing this job builds against the AMBIENT store
+      # (not the isolated `$DYNDRV_STORE`): the fetched+built patched-Nix
+      # itself (`try-it-out/patched-nix.nix`, resolved via a plain `nix
+      # build` inside `try-it-out/run-nix.sh` before it ever re-execs
+      # into the diverted store -- see that script's own header comment).
+      # This is the single most expensive, most cache-worthy build in
+      # this whole workflow (a full NixOS/nix checkout). Every OTHER
+      # derivation this job builds (every `dyndrv-*`/`example-*` check)
+      # only ever exists inside `$DYNDRV_STORE`'s own on-disk layout
+      # (`$DYNDRV_STORE/nix/store/...`, never plain `/nix/store/...`) --
+      # confirmed by direct reproduction that `cachix push` cannot read
+      # those at all, regardless of `NIX_REMOTE`: it does a raw
+      # filesystem `stat` on the plain `/nix/store/<hash>-...` path
+      # (unlike `nix-store`/`nix`, which respect `NIX_REMOTE`'s
+      # `root=`), so it fails with "pathIsSymbolicLink: does not exist"
+      # for anything that only exists under the diverted root. Gated on
+      # secret access (same pattern `~/overlay`'s own CI already uses)
+      # so a fork PR -- which never has repo secrets -- skips this step
+      # instead of failing on a missing token.
+      - name: Push patched-nix to Cachix
         if: ${{ github.event.pull_request.head.repo.full_name == github.repository || github.event_name == 'push' }}
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          NIX_REMOTE: local?root=/tmp/dyndrv-store
         run: |
           if [[ -z "${CACHIX_AUTH_TOKEN:-}" ]]; then
             echo "No CACHIX_AUTH_TOKEN secret configured -- skipping push."
             exit 0
           fi
-          for check in example-01 example-02 example-03-graph-of-two \
-            example-03-graph-of-three example-03-graph-with-groups \
-            example-03-graph-groupby-directory example-05 example-06 \
-            example-07-accelerated example-07-patch-output \
-            example-17 example-18 example-19 example-20 example-21; do
-            OUT=$(./try-it-out/run-nix.sh build --impure --no-link \
-              --print-out-paths ".#checks.x86_64-linux.$check" || true)
-            [[ -n "$OUT" ]] && echo "$OUT" | cachix push "$CACHIX_CACHE"
-          done
+          SYSTEM=$(nix config show --json | jq -r .system.value)
+          OUT=$(nix build --no-link --print-out-paths \
+            --argstr system "$SYSTEM" \
+            -f try-it-out/patched-nix.nix '^*' || true)
+          [[ -n "$OUT" ]] && echo "$OUT" | cachix push "$CACHIX_CACHE"
