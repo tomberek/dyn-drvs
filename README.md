@@ -288,3 +288,4 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
 
 See `docs/upstream-tracking.md` for which of these trace back to a
 specific NixOS/nix issue, rather than being a `dyndrv`-side gap.
+
