@@ -38,10 +38,10 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-34 are the
+      # via two separate attr-path invocations. Examples 17-35 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus twelve follow-up
+      # phase-dropping, `finalAttrs.finalPackage`) plus thirteen follow-up
       # argv-shape/phase-ordering/dependency-wiring/structuredAttrs
       # regressions (compile+link-in-one-step, `-MT`/`-MF` values
       # misidentified as the source file, `ar`/`ranlib` probe-invocation
@@ -59,11 +59,13 @@
       # target-import file's `_IMPORT_PREFIX`, never rewritten before a
       # caller's own `postFixup substituteInPlace` expects to find the
       # real `$out`, meson's own `testfile.<suffix>`-named compiler-
-      # check probes not being recognized as passthrough-eligible, and a
+      # check probes not being recognized as passthrough-eligible, a
       # literal `outputBin`/`outputMan`/`outputDev` override inherited
       # from the caller crashing phase 1 setup outright before any real
-      # compile runs), each confirmed failing before its own fix and
-      # passing after -- see each file's own header comment for the
+      # compile runs, and automake's classic depcomp `-MF <depfile>`
+      # side-output never round-tripping back out of a deferred compile),
+      # each confirmed failing before its own fix and passing after --
+      # see each file's own header comment for the
       # exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
@@ -102,6 +104,7 @@
           example-32 = import ./try-it-out/examples/32-accelerate-cmake-import-prefix.nix { inherit pkgs; };
           example-33 = import ./try-it-out/examples/33-accelerate-meson-probe.nix { inherit pkgs; };
           example-34 = import ./try-it-out/examples/34-accelerate-outputbin-override.nix { inherit pkgs; };
+          example-35 = import ./try-it-out/examples/35-accelerate-depfile-side-output.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

@@ -311,6 +311,55 @@ let
     fi
     ${writeStubFn}
     dyndrv_write_batch_stub "$outputPath" "$recordPath"
+    # Automake's classic depcomp idiom (`-MT $@ -MD -MP -MF
+    # .deps/$*.Tpo` alongside `-c -o $@`) writes a SECOND file as a
+    # byproduct of the same compile, then the OUTER, unaccelerated
+    # `make` process immediately runs `mv -f .deps/$*.Tpo .deps/$*.Po`
+    # on it -- see `docs/depfile-side-output-bug.md` for the full
+    # writeup. Only the primary `-o`/`outputArg` output gets a deferred
+    # stub above; `-MF <path>`'s own value is never tracked at all, so
+    # that `mv` fails outright ("No such file or directory") the moment
+    # this compile defers instead of running for real -- confirmed via
+    # direct reproduction against real nixpkgs gperf, every one of its
+    # ~20 real per-TU compiles failing identically at the Makefile line
+    # immediately after the (successfully deferred) compile stub.
+    # Since Nix always rebuilds fully from scratch (no cross-derivation
+    # incremental-depfile reuse the way a real, unaccelerated `make`
+    # re-run would exploit -- the eventual real compile, once it runs
+    # for real inside `shim.collectStubs`'s own deferred derivation,
+    # writes ITS OWN copy of this same file inside that derivation's
+    # own isolated sandbox, but that derivation only ever tracks the
+    # primary `.o` as a real Nix output, so this copy is simply
+    # discarded, never fed back anywhere `make`'s own dependency
+    # tracking reads from again), the depfile's CONTENT is irrelevant
+    # here -- only its EXISTENCE, in THIS outer, unaccelerated tree,
+    # matters, so the immediately-following `mv` succeeds. An empty
+    # file is sufficient:
+    # confirmed by direct reading of automake's own `depcomp` script
+    # (`gcc3` mode: `"$@" ...; mv "$tmpdepfile" "$depfile"` -- the `mv`
+    # only checks the file EXISTS, never its content) and by direct
+    # reproduction against real gperf with this exact fix. Scans the
+    # ORIGINAL, not-yet-batched argv (`"$@"`, this wrapper script's own
+    # positional params, unrelated to `argvForCc`'s rewritten "$out"
+    # sentinel) for `-MF <path>`, touching an empty file there (relative
+    # to the invocation's own real cwd, NOT `$treeDir` -- the `mv` reads
+    # from the caller's own working directory, never the per-invocation
+    # staging tree this script already tore down by this point).
+    dyndrv_mf_next=0
+    for dyndrv_mf_a in "$@"; do
+      if [ "$dyndrv_mf_next" = 1 ]; then
+        case "$dyndrv_mf_a" in
+          /*) ;; # an absolute depfile path is a real store/build input already, not this invocation's own byproduct to touch
+          *)
+            ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname "$dyndrv_mf_a")" 2>/dev/null || true
+            : > "$dyndrv_mf_a" 2>/dev/null || true
+            ;;
+        esac
+        dyndrv_mf_next=0
+      elif [ "$dyndrv_mf_a" = "-MF" ]; then
+        dyndrv_mf_next=1
+      fi
+    done
   '';
 in
 {

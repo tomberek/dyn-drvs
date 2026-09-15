@@ -274,26 +274,6 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   "materialize now" mode, which `builder-rpc-v0` categorically cannot
   support. A separate `checkPhase` (gated by `doCheck`, running AFTER
   `buildPhase`) is unaffected. See `docs/discovertree-exec-bit-bug.md`.
-- **`phases.split` forces `outputs = ["out"]` but doesn't clear a stale
-  `outputBin`/`outputMan`/`outputDev` literal override**, breaking any
-  package whose recipe sets one of those explicitly (e.g. `libpng`,
-  `libtasn1`: both set `outputBin = "dev"`) with `_assignFirst: could
-  not find a non-empty variable`. See
-  `docs/split-outputbin-override-bug.md`.
-- **Secondary compiler side-outputs (`-MD`/`-MF` depfiles) don't survive
-  the sandbox boundary** — automake's classic `-MF .deps/$*.Tpo` + `mv`
-  depcomp idiom fails immediately after every real compile succeeds,
-  since only the primary `-o` output is tracked. Confirmed on `gperf`.
-  See `docs/depfile-side-output-bug.md`.
-- **The synthesized `dyndrvRestoreOutput` phase runs too late for a
-  package whose `postInstall` touches `$out` itself** (e.g.
-  `wrapProgram`) — `postInstall` fires as part of nixpkgs'
-  `installPhase` itself, before `dyndrvRestoreOutput` (inserted as a
-  separate phase AFTER `installPhase`) ever copies the placeholder tree
-  into the real `$out`. Confirmed on `mosh` (`wrapProgram
-  $out/bin/mosh` fails with "does not exist" even though `bin/mosh`
-  really was installed, just under the still-not-yet-restored
-  placeholder root). See `docs/split-postinstall-before-restore-bug.md`.
 
 See `docs/upstream-tracking.md` for which of these trace back to a
 specific NixOS/nix issue, rather than being a `dyndrv`-side gap.
