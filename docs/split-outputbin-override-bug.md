@@ -1,6 +1,21 @@
 # Bug: `phases.split` forces `outputs = ["out"]` but doesn't clear a stale `outputBin`/`outputMan`/`outputDev` override
 
-## Summary
+## Status: fixed
+
+Fixed in `0a8b174` ("Fix phases.split: clear inherited outputBin/
+outputMan/outputDev literal overrides (task #147)") -- implements this
+doc's own suggested fix exactly: `sandboxedDrv` now also resets every
+scalar output override nixpkgs' `multiple-outputs.sh` itself declares
+(`outputBin`/`outputMan`/`outputDev`/`outputInclude`/`outputLib`/
+`outputDoc`/`outputDevdoc`/`outputDevman`/`outputInfo`) back to `"out"`,
+alongside the existing `outputs`/`separateDebugInfo`/`__structuredAttrs`
+forcing. Confirmed directly against real `libpng`/`libtasn1`: the
+original `_assignFirst` crash no longer occurs (both packages now get
+much further into a real build before hitting a SEPARATE, already-
+documented bug -- `discovertree-link-step-bug.md`'s libtool `.libs/*.so`
+gap -- confirming this fix's own scope is correct and complete).
+
+## Summary (original writeup, kept as history)
 
 `phases.split`'s `sandboxedDrv` (`nix/lib/phases/split.nix` ~line 194)
 forces phase 1 to `outputs = [ "out" ]` unconditionally, with its own

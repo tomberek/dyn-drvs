@@ -1,6 +1,24 @@
 # Bug: secondary compiler side-outputs (`-MD`/`-MF` depfiles) don't round-trip back to the caller's tree
 
-## Summary
+## Status: fixed
+
+Fixed in `9dc8037` ("Fix wrapCommand: touch empty -MF depfile at defer
+time (task #148)") -- NOT via the "suggested fix" below (tracking `-MF`
+as a genuine second Nix-level output was ruled out: every registered
+per-unit derivation is architecturally single-output, `"out"`, and
+adding a real second output per compile stub would need a much larger
+structural change). Instead: since Nix always rebuilds fully from
+scratch (no cross-derivation incremental-depfile reuse the way a real
+`make` re-run would exploit), the depfile's CONTENT is irrelevant --
+only its EXISTENCE matters for the immediately-following `mv`.
+`finalizeTail` (shared by both `wrapCommand.nix` wrapper-script
+variants) now scans the original argv for `-MF <path>` and touches an
+empty file there directly in the outer, unaccelerated tree. Confirmed
+directly against real `gperf`: every one of its ~20 real per-TU
+compiles now succeeds end to end, producing a genuine, runnable
+`bin/gperf`.
+
+## Summary (original writeup, kept as history)
 
 Automake-generated Makefiles compile with the classic depcomp idiom:
 

@@ -1,6 +1,20 @@
 # Bug: `phases.split`'s synthesized `dyndrvRestoreOutput` phase runs too late for packages whose `postInstall` touches `$out` itself (e.g. `wrapProgram`)
 
-## Summary
+## Status: fixed
+
+Fixed in `1347c8c` ("Fix phases.split: dyndrvRestoreOutput ran too late
+for postInstall reading $out (task #140)") -- `dyndrvCopyPlaceholderScript`
+(the placeholder-copy half of the restore logic) is now prepended
+directly to `replay.postInstall`, so it runs before ANY caller-supplied
+`postInstall` gets a chance to read/write `$out`; the multi-output split
+half (`dyndrvMultioutSplitScript`) stays in the later
+`dyndrvRestoreOutput` phase, unaffected by this fix (confirmed necessary
+by direct reproduction against leveldb -- splitting too early moved
+content out of `$out` before ITS OWN `postInstall` could see it there).
+Confirmed directly: `dyndrv-mosh` now builds clean end to end,
+`wrapProgram $out/bin/mosh` succeeds.
+
+## Summary (original writeup, kept as history)
 
 Found retesting `nix/packages/mosh.nix` after bumping `dyndrv` to
 8aa6b86 (which fixed the autoreconfHook phase-dropping bug that
