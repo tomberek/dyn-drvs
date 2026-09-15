@@ -1,6 +1,29 @@
 # Bug: bare `-l<name>` link args are never resolved to their producing derivation
 
-## Summary
+## Status: fixed (search-path resolution) -- x265 itself still blocked by a SEPARATE, deeper bug
+
+The `-l<name>`/`-L<dir>` search-path resolution described below is
+fixed in `<pending>` ("Fix wrapCommand: resolve bare -l<name> against
+relative -L<dir> search paths (task #149)") -- confirmed via a minimal
+fixture (`example-36`) reproducing the exact shape (a static lib built
+in a separate subdirectory, symlinked into the main build tree under a
+different basename, linked via a bare `-L. -lname`). Retesting real
+x265 against this fix DOES resolve `-lx265-10`/`-lx265-12` correctly
+(rewritten to `../build-10bits/libx265.a`/`../build-12bits/libx265.a`,
+the real symlink targets) -- but x265 itself is STILL blocked, by a
+second, deeper, genuinely distinct bug: `build-10bits`/`build-12bits`
+are entire SEPARATE cmake configure+build trees, created as SIBLINGS of
+the main `build/` directory (x265's own `preConfigure` runs `cmake -B
+build-10bits ...` from `source/`, BEFORE `configurePhase`'s own `cd
+build`) -- `shim.collectStubs`'s stub-discovery walk only ever scans
+`dyndrv_buildRoot` (`.`, which resolves to `build/` by the time
+`collectPhase` runs), so the real `ar`-produced stub sitting in the
+sibling `build-10bits/` is never discovered as a stub at all. See
+`docs/sibling-build-dir-not-discovered-bug.md` for the full writeup of
+this second bug -- x265 remains on its `multibitdepthSupport = false`
+workaround until that one is also fixed.
+
+## Summary (original writeup, kept as history)
 
 The `overlay` showcase repo's wide nixpkgs survey has driven every
 package it tried into either a genuine PASS or a package-level

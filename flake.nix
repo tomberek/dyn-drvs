@@ -38,10 +38,10 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-35 are the
+      # via two separate attr-path invocations. Examples 17-36 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus thirteen follow-up
+      # phase-dropping, `finalAttrs.finalPackage`) plus fourteen follow-up
       # argv-shape/phase-ordering/dependency-wiring/structuredAttrs
       # regressions (compile+link-in-one-step, `-MT`/`-MF` values
       # misidentified as the source file, `ar`/`ranlib` probe-invocation
@@ -62,9 +62,11 @@
       # check probes not being recognized as passthrough-eligible, a
       # literal `outputBin`/`outputMan`/`outputDev` override inherited
       # from the caller crashing phase 1 setup outright before any real
-      # compile runs, and automake's classic depcomp `-MF <depfile>`
-      # side-output never round-tripping back out of a deferred compile),
-      # each confirmed failing before its own fix and passing after --
+      # compile runs, automake's classic depcomp `-MF <depfile>`
+      # side-output never round-tripping back out of a deferred compile,
+      # and a bare `-l<name>` link argument never resolved against its
+      # own relative `-L<dir>` search path), each confirmed failing
+      # before its own fix and passing after --
       # see each file's own header comment for the
       # exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
@@ -105,6 +107,7 @@
           example-33 = import ./try-it-out/examples/33-accelerate-meson-probe.nix { inherit pkgs; };
           example-34 = import ./try-it-out/examples/34-accelerate-outputbin-override.nix { inherit pkgs; };
           example-35 = import ./try-it-out/examples/35-accelerate-depfile-side-output.nix { inherit pkgs; };
+          example-36 = import ./try-it-out/examples/36-accelerate-bare-lname-link-arg.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

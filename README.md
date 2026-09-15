@@ -274,15 +274,29 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   "materialize now" mode, which `builder-rpc-v0` categorically cannot
   support. A separate `checkPhase` (gated by `doCheck`, running AFTER
   `buildPhase`) is unaffected. See `docs/discovertree-exec-bit-bug.md`.
-- **A bare `-l<name>` link argument (a linker search-path reference, not
-  a literal store path) is never resolved to the dynamic derivation that
-  will produce it** — every existing dependency-wiring scan works by
-  matching a LITERAL, already-resolved `/nix/store/...` substring
-  already present in argv; `-l<name>` names its target only by basename,
-  resolved by `ld` itself at link time. Confirmed on `x265` (its own
-  multi-bitdepth encoder links `-lx265-10`/`-lx265-12`): `ld.bfd: cannot
-  find -lx265-10: No such file or directory`, `inputs.drvs = {}` on the
-  failing link derivation. See `docs/bare-lname-link-arg-bug.md`.
+- **A bare `-l<name>` link argument's own producing STUB, when built in
+  a sibling directory created before the main build dir (e.g. via a
+  `preConfigure`/`preBuild` hook running a second, independent
+  configure+build cycle), is never discovered by `shim.collectStubs` at
+  all** — stub-discovery only scans `dyndrv_buildRoot` itself; a
+  sibling directory's own real content is carried forward for source/
+  header purposes (`.dyndrv-carried-up1`) but never re-scanned for
+  stubs. The `-l<name>`/relative-`-L<dir>` search-path resolution itself
+  IS fixed (`-lx265-10` now correctly rewrites to its real relative
+  symlink target, `../build-10bits/libx265.a`) — see
+  `docs/bare-lname-link-arg-bug.md` — but x265 itself remains blocked by
+  this second, distinct gap: `ld.bfd: cannot find ../build-10bits/
+  libx265.a: No such file or directory` even though that file's
+  producing `ar` step genuinely ran (and deferred) for real. See
+  `docs/sibling-build-dir-not-discovered-bug.md`.
+- **A libtool-generated unversioned `.so` symlink (`libfoo.so ->
+  libfoo.so.N.N.N`) is never registered as an alias for the dynamic
+  derivation that produces the real, versioned file** — a later link
+  step that references the library by its unversioned name (a common
+  in-tree convention: an example/test binary in the SAME package links
+  against `libfoo.so`, not `libfoo.so.N.N.N` directly) finds nothing,
+  since only the real file was ever tracked. Confirmed on `libpng`/
+  `libtasn1`. See `docs/libtool-so-symlink-bug.md`.
 
 See `docs/upstream-tracking.md` for which of these trace back to a
 specific NixOS/nix issue, rather than being a `dyndrv`-side gap.

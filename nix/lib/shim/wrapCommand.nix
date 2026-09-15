@@ -584,6 +584,96 @@ in
         # handles both the bare and any glued-flag-prefix form
         # generically, rather than one `case` arm per known flag letter.
         origPwd=$(${pkgs.coreutils}/bin/pwd)
+        # A bare `-l<name>` link argument (`-lx265-10`) is a linker
+        # SEARCH-PATH reference, not a literal file path -- it names its
+        # target only by basename, resolved by `ld` itself at link time
+        # against whatever `-L<dir>` search paths are active. Every OTHER
+        # dependency-wiring mechanism in this shim (the positional-arg
+        # scan below, `discoverTree`'s own `-M -MG` scan,
+        # `extraStorePaths`' literal-substring match) works by finding a
+        # literal relative/absolute PATH somewhere in argv -- none of
+        # them has anything to match against here, since `-lx265-10`'s
+        # own text never names `libx265-10.a` at all. Confirmed via real
+        # nixpkgs x265 (`docs/bare-lname-link-arg-bug.md`): its own
+        # cmake-generated link line reads `-Wl,-Bstatic -lx265-10
+        # -lx265-12 -Wl,-Bdynamic`, where `libx265-10.a`/`libx265-12.a`
+        # are RELATIVE symlinks x265's own `preBuild` creates
+        # (`ln -s ../build-10bits/libx265.a ./libx265-10.a`) pointing at
+        # a SEPARATE deferred `ar` invocation's own not-yet-resolved
+        # output -- `ld.bfd: cannot find -lx265-10: No such file or
+        # directory`, since nothing ever staged/resolved it.
+        #
+        # Fixed here, ONE step before everything else in this script
+        # (including `stripPwdPrefix`) ever sees argv: resolve any
+        # `-l<name>` against the SAME `-L<dir>` search-path convention
+        # `ld` itself would use, restricted to RELATIVE search dirs only
+        # (an ABSOLUTE `-L<dir>`, e.g. a real Nix store lib directory,
+        # can never resolve to a not-yet-built stub -- only relative
+        # `-L.`/`-Lbuild/lib`-style in-tree paths matter here; this
+        # build's own `NIX_LDFLAGS`-injected absolute `-L` entries are
+        # irrelevant), and REWRITE `-l<name>` into that resolved
+        # RELATIVE path directly in argv. From this point on, `-lx265-10`
+        # simply reads as `libx265-10.a` everywhere downstream -- the
+        # existing positional-arg literal-path machinery (staging real
+        # files, recognizing pending stubs, wiring cross-unit
+        # `inputs.drvs`) already handles an ordinary relative path
+        # correctly, with zero changes needed anywhere else. Prefers a
+        # match found via an EARLIER `-L<dir>` over a LATER one, matching
+        # `ld`'s own first-match search-path semantics; within one
+        # directory, `.so` is tried before `.a` (a real system `.so`
+        # living in an absolute `-L` directory was already excluded
+        # above, so whichever variant genuinely exists locally, relative
+        # to the build root, is the only one that could possibly be a
+        # same-build dependency worth resolving).
+        dyndrvLDirs="."
+        for dyndrvLArg in "$@"; do
+          case "$dyndrvLArg" in
+            -L/*) ;;
+            -L*) dyndrvLDirs="$dyndrvLDirs
+        ''${dyndrvLArg#-L}" ;;
+          esac
+        done
+        dyndrvLFirstArg=1
+        for dyndrvLArg in "$@"; do
+          case "$dyndrvLArg" in
+            -l*)
+              dyndrvLName="''${dyndrvLArg#-l}"
+              dyndrvLResolved=""
+              while IFS= read -r dyndrvLDir; do
+                [ -z "$dyndrvLDir" ] && continue
+                for dyndrvLExt in so a; do
+                  dyndrvLCand="$dyndrvLDir/lib$dyndrvLName.$dyndrvLExt"
+                  if [ -e "$dyndrvLCand" ]; then
+                    # `-e` above only confirms SOMETHING exists at this
+                    # path -- x265's own real shape (`ln -s
+                    # ../build-10bits/libx265.a ./libx265-10.a`) is a
+                    # SYMLINK, and its literal text (`./libx265-10.a`)
+                    # would never match any discovered stub's own key
+                    # (`build-10bits/libx265.a`) -- `realpath` resolves
+                    # through it to the CANONICAL underlying path (still
+                    # relative to `$origPwd`, matching every OTHER
+                    # relative reference this script already produces),
+                    # so the rewritten argv element names the SAME path
+                    # the earlier `ar` stub was actually written to.
+                    dyndrvLResolved=$(${pkgs.coreutils}/bin/realpath -m --relative-to="$origPwd" "$dyndrvLCand")
+                    break 2
+                  fi
+                done
+              done <<DYNDRV_LDIRS
+        $dyndrvLDirs
+        DYNDRV_LDIRS
+              if [ -n "$dyndrvLResolved" ]; then
+                dyndrvLArg="$dyndrvLResolved"
+              fi
+              ;;
+          esac
+          if [ "$dyndrvLFirstArg" = 1 ]; then
+            set -- "$dyndrvLArg"
+            dyndrvLFirstArg=0
+          else
+            set -- "$@" "$dyndrvLArg"
+          fi
+        done
         stripPwdPrefix() {
           case "$1" in
             "$origPwd"/*) printf '%s' "''${1#"$origPwd"/}" ;;
