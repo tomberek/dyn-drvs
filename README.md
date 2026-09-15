@@ -274,6 +274,15 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   "materialize now" mode, which `builder-rpc-v0` categorically cannot
   support. A separate `checkPhase` (gated by `doCheck`, running AFTER
   `buildPhase`) is unaffected. See `docs/discovertree-exec-bit-bug.md`.
+- **A bare `-l<name>` link argument (a linker search-path reference, not
+  a literal store path) is never resolved to the dynamic derivation that
+  will produce it** — every existing dependency-wiring scan works by
+  matching a LITERAL, already-resolved `/nix/store/...` substring
+  already present in argv; `-l<name>` names its target only by basename,
+  resolved by `ld` itself at link time. Confirmed on `x265` (its own
+  multi-bitdepth encoder links `-lx265-10`/`-lx265-12`): `ld.bfd: cannot
+  find -lx265-10: No such file or directory`, `inputs.drvs = {}` on the
+  failing link derivation. See `docs/bare-lname-link-arg-bug.md`.
 
 See `docs/upstream-tracking.md` for which of these trace back to a
 specific NixOS/nix issue, rather than being a `dyndrv`-side gap.
