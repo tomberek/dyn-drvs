@@ -252,8 +252,21 @@ let
         *CMakeFiles/CMakeScratch/TryCompile-*) is_cmake_probe=1 ;;
       esac
 
+      # `isMesonProbe`: see `toNode`'s own matching `isMesonProbe` comment
+      # -- meson's own compiler-check primitives unconditionally name
+      # their scratch source file `testfile.<suffix>`.
+      is_meson_probe() {
+        case "$(${pkgs.coreutils}/bin/basename "$1")" in
+          testfile.*) return 0 ;;
+          *) return 1 ;;
+        esac
+      }
+
       is_probe=0
       if [ -n "$source_path" ] && is_conftest "$source_path"; then
+        is_probe=1
+      fi
+      if [ -n "$source_path" ] && is_meson_probe "$source_path"; then
         is_probe=1
       fi
       if [ "$out_idx" != -1 ] && is_conftest "$out_val"; then
@@ -265,7 +278,7 @@ let
 
       # Positional args (non-flag, not `-o`'s own value) + real-link /
       # compile-to-executable-probe / info-query detection, and a second
-      # `is_conftest` scan over every positional arg.
+      # `is_conftest`/`is_meson_probe` scan over every positional arg.
       has_object_or_archive=0
       has_positional=0
       i=0
@@ -279,6 +292,9 @@ let
                 *.o | *.a | *.so) has_object_or_archive=1 ;;
               esac
               if is_conftest "$a"; then
+                is_probe=1
+              fi
+              if is_meson_probe "$a"; then
                 is_probe=1
               fi
             fi
@@ -646,6 +662,32 @@ let
       isCMakeProbe =
         let cwd = builtins.getEnv "DYNDRV_INVOCATION_CWD"; in
         builtins.match ".*CMakeFiles/CMakeScratch/TryCompile-.*" cwd != null;
+      # THIRD passthrough signal, for meson's own equivalent mechanism:
+      # every compiler-check primitive (`get_supported_arguments`,
+      # `has_function`, `has_header`, `compiles`, `links`, ...) funnels
+      # through `Compiler.compile()`, which UNCONDITIONALLY names its
+      # scratch source file `testfile.<suffix>` (confirmed directly from
+      # meson's own source, `mesonbuild/compilers/compilers.py`:
+      # `os.path.join(tmpdirname, 'testfile.' + self.default_suffix)`,
+      # and by direct reproduction: every meson probe's own captured
+      # command line names this exact file) inside a FRESH
+      # `tempfile.TemporaryDirectory()` each time -- unlike CMake's
+      # fixed `CMakeFiles/CMakeScratch/TryCompile-*` naming (checked via
+      # cwd above), meson's tmpdir name itself is unpredictable, so
+      # `sourcePath`'s own basename (matching `isConftest`'s convention)
+      # is the only reliable signal here. Without this, a `-c`
+      # (object-only) flag-support probe like dav1d's own
+      # `cc.get_supported_arguments(['-Wshorten-64-to-32'])` -- which
+      # ALREADY has a compile flag and a real positional source, so
+      # neither `isCompileToExecutableProbe` nor `isInfoQuery` catch it
+      # -- gets deferred into a batched node that always reports
+      # success, meson concludes the (actually unsupported) flag IS
+      # supported, bakes it into every real TU's own compile flags, and
+      # every real compile then fails outright on the unrecognized
+      # option. Confirmed by direct reproduction against real nixpkgs
+      # dav1d: `gcc: error: unrecognized command-line option
+      # '-Wshorten-64-to-32'`.
+      isMesonProbe = a: a != null && hasPrefix "testfile." (builtins.baseNameOf a);
       hasSuffix = suffix: str:
         let
           sl = builtins.stringLength suffix;
@@ -687,7 +729,9 @@ let
         || isConftest sourcePath
         || builtins.any isConftest positionalArgs
         || (outIdx != (-1) && isConftest (builtins.elemAt argv (outIdx + 1)))
-        || isCMakeProbe;
+        || isCMakeProbe
+        || isMesonProbe sourcePath
+        || builtins.any isMesonProbe positionalArgs;
     in
     # PASSTHROUGH for any probe invocation -- see `isProbe` above. These
     # need to run for real, synchronously, since either the calling
