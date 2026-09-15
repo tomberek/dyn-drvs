@@ -386,6 +386,37 @@ let
       cp -r ${dyndrvPlaceholderOut}/. "$out"/
       chmod -R u+w "$out"
       rm -rf ${dyndrvPlaceholderOut}
+      # cmake's `install(EXPORT ...)` (nixpkgs' own libssh recipe, among
+      # others) bakes phase 1's literal placeholder path into a target
+      # import file's `_IMPORT_PREFIX` at CONFIGURE time -- a third
+      # instance of the same class of bug the meson `.pc`-file rewrite in
+      # `postFixup` below and the autotools/meson tree-hoist above both
+      # already handle, but for arbitrary text file CONTENT rather than
+      # tree location or a single known filename pattern. Confirmed via
+      # direct reproduction against real libssh: cmake generates a
+      # literal `set(_IMPORT_PREFIX "/build/dyndrv-placeholder-out")` (NOT
+      # the relative `get_filename_component`-based form cmake falls back
+      # to when every install dir is a plain subpath of ONE prefix --
+      # nixpkgs' own multi-output `CMAKE_INSTALL_*DIR` flags are already
+      # absolute paths under phase 1's single forced output, which tips
+      # cmake into baking a literal instead) into `$dev/lib/cmake/libssh/
+      # libssh-config.cmake`; nixpkgs' own unmodified `postFixup` then
+      # runs `substituteInPlace ... --replace-fail "set(_IMPORT_PREFIX
+      # \"$out\")" ...`, which fails outright ("doesn't match anything")
+      # since the file never contained `$out` literally, only the
+      # placeholder. Rewriting every text file's CONTENT here (grep -rlI,
+      # skipping binaries, matching nixpkgs' own "checking for references
+      # to /build/" fixup step's own binary-skip convention) rather than
+      # only `.pc` files/known filenames means any OTHER build tool that
+      # bakes this same placeholder into generated text -- not just
+      # cmake's `_IMPORT_PREFIX` -- is covered by the same mechanism.
+      # Runs here (prepended to `postInstall`, before ANY caller code or
+      # the later `_multioutDevs` split) so the file already reads the
+      # real `$out` literally by the time nixpkgs' own `_multioutDevs`
+      # moves it to `$dev` and ITS OWN `postFixup` rewrite runs.
+      for dyndrvRefFile in $(${pkgs.gnugrep}/bin/grep -rlI -- "${dyndrvPlaceholderOut}" "$out" 2>/dev/null); do
+        ${pkgs.gnused}/bin/sed -i "s|${dyndrvPlaceholderOut}|$out|g" "$dyndrvRefFile"
+      done
     fi
     # `dyndrvPhase1Out` (see `dyndrvCdToBuildDir` above) is only set
     # for a meson build -- `meson install`'s own `$DESTDIR` PREPENDS

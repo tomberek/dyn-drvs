@@ -38,10 +38,10 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-31 are the
+      # via two separate attr-path invocations. Examples 17-32 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus nine follow-up
+      # phase-dropping, `finalAttrs.finalPackage`) plus ten follow-up
       # argv-shape/phase-ordering/dependency-wiring/structuredAttrs
       # regressions (compile+link-in-one-step, `-MT`/`-MF` values
       # misidentified as the source file, `ar`/`ranlib` probe-invocation
@@ -52,11 +52,15 @@
       # too late for a `postInstall` that reads/writes `$out` directly,
       # `ar`/`ranlib` probes with a non-`-`-prefixed positional value
       # elsewhere in argv, multi-output restore never redistributing
-      # ordinary `bin`/`lib` content, and `__structuredAttrs = true`
+      # ordinary `bin`/`lib` content, `__structuredAttrs = true`
       # silently defeating `sandboxedDrv`'s own `out =
-      # dyndrvPlaceholderOut` override), each confirmed failing before
-      # its own fix and passing after -- see each file's own header
-      # comment for the exact bug it guards against.
+      # dyndrvPlaceholderOut` override, and cmake's `install(EXPORT
+      # ...)` baking that SAME literal placeholder path into a generated
+      # target-import file's `_IMPORT_PREFIX`, never rewritten before a
+      # caller's own `postFixup substituteInPlace` expects to find the
+      # real `$out`), each confirmed failing before its own fix and
+      # passing after -- see each file's own header comment for the
+      # exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
           inherit pkgs;
@@ -91,6 +95,7 @@
           example-28 = import ./try-it-out/examples/28-accelerate-ar-ranlib-plugin-probe.nix { inherit pkgs; };
           example-29 = import ./try-it-out/examples/29-accelerate-multioutput-lib-restore.nix { inherit pkgs; };
           example-31 = import ./try-it-out/examples/31-accelerate-structured-attrs.nix { inherit pkgs; };
+          example-32 = import ./try-it-out/examples/32-accelerate-cmake-import-prefix.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 
