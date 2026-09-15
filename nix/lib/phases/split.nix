@@ -267,6 +267,39 @@ let
       # works completely normally -- phase 1 only ever produces the ONE
       # `.drv` file `shim.collectStubs` submits.
       outputs = [ "out" ];
+      # Clears any `outputBin`/`outputMan`/`outputDev`/etc SCALAR
+      # override `sandboxed` inherits from a real multi-output package's
+      # own recipe (e.g. nixpkgs' `libpng`/`libtasn1`, both of which set
+      # `outputBin = "dev";` literally) back to `"out"` -- confirmed
+      # necessary by direct reproduction: without this, the `outputs =
+      # [ "out" ]` override two lines above removes every output EXCEPT
+      # `out`, but a caller's own LITERAL `outputBin = "dev"` (not
+      # stdenv's own fallback-to-`"out"` default, which the header
+      # comment above already covers) passes straight through the `//`
+      # merge unchanged. Inside phase 1's sandbox, nixpkgs' own
+      # `multiple-outputs.sh` sees `outputBin` is ALREADY non-empty
+      # (`"dev"`) and skips its own `_overrideFirst outputBin "bin"
+      # "out"` fallback entirely, then `_overrideFirst outputMan "man"
+      # "$outputBin"` expands to `_assignFirst outputMan "man" "dev"` --
+      # looking for a non-empty `$man` or `$dev` env var, neither of
+      # which phase 1 ever exports (only `$out`) -- and crashes outright
+      # BEFORE `configurePhase` even starts: `_assignFirst: could not
+      # find a non-empty variable whose name to assign to outputMan.`
+      # Every scalar override `multiple-outputs.sh` itself declares
+      # (confirmed via that file's own source) is listed here, not just
+      # `outputBin`/`outputMan`/`outputDev` -- a package could set any
+      # of these to a real, non-fallback value. See
+      # `docs/split-outputbin-override-bug.md` for the full writeup
+      # (confirmed independently on real `libpng`/`libtasn1`).
+      outputBin = "out";
+      outputMan = "out";
+      outputDev = "out";
+      outputInclude = "out";
+      outputLib = "out";
+      outputDoc = "out";
+      outputDevdoc = "out";
+      outputDevman = "out";
+      outputInfo = "out";
       # `separateDebugInfo = false`: nixpkgs' own stdenv machinery
       # injects an EXTRA "debug" output whenever `separateDebugInfo =
       # true` is set, INDEPENDENTLY of the plain `outputs` attrset
