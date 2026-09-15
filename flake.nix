@@ -38,23 +38,25 @@
       # `07-accelerate-real-package.nix` returns `{ accelerated;
       # patchOutput; }`, not a single derivation -- split into two
       # separate checks accordingly, matching how CI already builds it
-      # via two separate attr-path invocations. Examples 17-29 are the
+      # via two separate attr-path invocations. Examples 17-31 are the
       # regression fixtures for tasks #130-133 (cwd-relative-path-frame
       # mismatch, CMake compiler-flag-probe passthrough, `autoreconfHook`
-      # phase-dropping, `finalAttrs.finalPackage`) plus eight follow-up
-      # argv-shape/phase-ordering/dependency-wiring regressions (compile+
-      # link-in-one-step, `-MT`/`-MF` values misidentified as the source
-      # file, `ar`/`ranlib` probe-invocation crashes, cmake+make's own
-      # out-of-tree install failure, `ar`'s own real store-path inputs
-      # never wired as derivation deps, a `-Wl,`-glued flag's own
-      # embedded path never unglued before computing its output
-      # directory, `dyndrvRestoreOutput` running too late for a
-      # `postInstall` that reads/writes `$out` directly, `ar`/`ranlib`
-      # probes with a non-`-`-prefixed positional value elsewhere in
-      # argv, and multi-output restore never redistributing ordinary
-      # `bin`/`lib` content), each confirmed failing before its own fix
-      # and passing after -- see each file's own header comment for the
-      # exact bug it guards against.
+      # phase-dropping, `finalAttrs.finalPackage`) plus nine follow-up
+      # argv-shape/phase-ordering/dependency-wiring/structuredAttrs
+      # regressions (compile+link-in-one-step, `-MT`/`-MF` values
+      # misidentified as the source file, `ar`/`ranlib` probe-invocation
+      # crashes, cmake+make's own out-of-tree install failure, `ar`'s
+      # own real store-path inputs never wired as derivation deps, a
+      # `-Wl,`-glued flag's own embedded path never unglued before
+      # computing its output directory, `dyndrvRestoreOutput` running
+      # too late for a `postInstall` that reads/writes `$out` directly,
+      # `ar`/`ranlib` probes with a non-`-`-prefixed positional value
+      # elsewhere in argv, multi-output restore never redistributing
+      # ordinary `bin`/`lib` content, and `__structuredAttrs = true`
+      # silently defeating `sandboxedDrv`'s own `out =
+      # dyndrvPlaceholderOut` override), each confirmed failing before
+      # its own fix and passing after -- see each file's own header
+      # comment for the exact bug it guards against.
       checks = builtins.mapAttrs (system: pkgs:
         (import ./nix/tests {
           inherit pkgs;
@@ -88,6 +90,7 @@
           example-27 = import ./try-it-out/examples/27-accelerate-postinstall-reads-out.nix { inherit pkgs; };
           example-28 = import ./try-it-out/examples/28-accelerate-ar-ranlib-plugin-probe.nix { inherit pkgs; };
           example-29 = import ./try-it-out/examples/29-accelerate-multioutput-lib-restore.nix { inherit pkgs; };
+          example-31 = import ./try-it-out/examples/31-accelerate-structured-attrs.nix { inherit pkgs; };
         }
       ) nixpkgs.legacyPackages;
 

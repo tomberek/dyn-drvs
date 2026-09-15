@@ -283,6 +283,34 @@ let
       # normally in PHASE 2 below, which inherits the caller's own
       # unmodified `separateDebugInfo` setting.
       separateDebugInfo = false;
+      # `__structuredAttrs = false`, regardless of what the caller's own
+      # `sandboxed` attrset sets -- confirmed necessary by direct
+      # reproduction (a minimal isolated repro: a plain
+      # `stdenv.mkDerivation` with `__structuredAttrs = true;
+      # __contentAddressed = true; outputHashMode = "text"; out =
+      # "/build/my-placeholder-out";`, whose own `buildPhase` printed
+      # `$out` back): under `structuredAttrs`, Nix's own builder
+      # generates the sandboxed shell's env vars FROM the derivation's
+      # real, computed CA output path (via `NIX_ATTRS_SH_FILE`, sourced
+      # before `stdenv/setup` even runs), completely IGNORING the
+      # literal `out = dyndrvPlaceholderOut` attribute override two
+      # lines below -- so `$out` resolved to the real store path
+      # instead of the placeholder, defeating this WHOLE file's own
+      # "install into a fake path now, copy into the real `$out` later"
+      # mechanism entirely. Confirmed via real nixpkgs `brotli` (the
+      # only package hit so far that sets this): every real per-TU
+      # compile/link still succeeded, but the final derivation failed
+      # ("failed to produce output path for output 'lib'") since
+      # nothing ever went through the placeholder-then-restore path at
+      # all -- cmake's own `-- Installing:` log lines showed the REAL
+      # computed store path, not `/build/dyndrv-placeholder-out`.
+      # Forcing this off here (like `outputs`/`separateDebugInfo`
+      # above) is safe: phase 1 is a synthetic sandboxed derivation this
+      # file entirely controls the shape of, and PHASE 2 below (an
+      # ordinary derivation) still inherits the caller's own unmodified
+      # `__structuredAttrs` setting, so a package that genuinely needs
+      # it there (for whatever unrelated reason) still gets it.
+      __structuredAttrs = false;
       __contentAddressed = true;
       outputHashMode = "text";
       outputHashAlgo = "sha256";
