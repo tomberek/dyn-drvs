@@ -211,23 +211,45 @@ jobs:
   # bucket pays its own toolchain-fetch/build setup cost independently
   # (checkout, apparmor sysctl, nix-installer, cachix/magic-nix-cache
   # pull) -- a real, deliberate trade-off: total COMPUTE goes up
-  # (setup duplicated 4x instead of paid once), but WALL-CLOCK for this
-  # part of the workflow drops roughly 4x, since the 4 buckets run
-  # concurrently instead of one 30-check queue. `fail-fast: false` so
-  # one bucket's failure doesn't cancel the other 3 mid-run -- keeps
-  # the SAME "learn about every failure in one CI round-trip" property
-  # the collect-and-report step below already established, just
-  # extended across job boundaries instead of within one step.
-  # `cachix-action`'s own pull (populated by whichever job/run built a
-  # given `dyndrv-*`/`example-*` output first) means a bucket's own
-  # checks substitute instead of rebuilding wherever a previous run
-  # already produced them, softening the setup-duplication cost over
-  # time.
+  # (setup duplicated across buckets instead of paid once), but WALL-
+  # CLOCK for this part of the workflow drops, since buckets run
+  # concurrently instead of one 30-check queue -- capped to at most 2
+  # buckets at a time (`max-parallel: 2` on the job below), not all 4,
+  # to avoid a real, confirmed regression -- see that setting's own
+  # comment. `fail-fast: false` so one bucket's failure doesn't cancel
+  # the others mid-run -- keeps the SAME "learn about every failure in
+  # one CI round-trip" property the collect-and-report step below
+  # already established, just extended across job boundaries instead
+  # of within one step. `cachix-action`'s own pull (populated by
+  # whichever job/run built a given `dyndrv-*`/`example-*` output
+  # first) means a bucket's own checks substitute instead of
+  # rebuilding wherever a previous run already produced them,
+  # softening the setup-duplication cost over time.
   example-checks:
     name: Example checks (bucket ${{ matrix.bucket }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # `max-parallel: 2`: confirmed necessary by direct reproduction
+      # (CI run 35155121929) -- all 4 buckets running concurrently
+      # alongside the main job (5 jobs total) hit GitHub's own Actions
+      # Cache API rate limit for `magic-nix-cache-action`: "GitHub
+      # Actions Cache throttled Magic Nix Cache. Not trying to use it
+      # again on this run." That substituter then stays PERMANENTLY
+      # disabled for the rest of that job's run (not just retried
+      # later), cascading into real build failures wherever a later
+      # step in the SAME job needed a path only that cache had --
+      # confirmed this took down both a matrix bucket's own example
+      # check AND, independently, the main job's `devshell-parity-
+      # test.sh` step in the same run. Capping concurrency to 2 halves
+      # the peak number of simultaneous cache-API callers (main job +
+      # at most 2 buckets, vs. main job + all 4) -- softens the
+      # parallelism win from ~4x to ~2x for this part of the workflow,
+      # but that's the actual trade-off this fixes: unthrottled
+      # concurrency was never really 4x in practice, since the
+      # throttle-triggered cascade cost more wall-clock (via retries/
+      # cache-miss rebuilds) than the parallelism saved.
+      max-parallel: 2
       matrix:
         include:
           - bucket: 1
