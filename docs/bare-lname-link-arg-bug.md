@@ -1,6 +1,6 @@
 # Bug: bare `-l<name>` link args are never resolved to their producing derivation
 
-## Status: fixed (search-path resolution) -- x265 itself still blocked by a SEPARATE, deeper bug
+## Status: fixed (search-path resolution) -- x265 itself now blocked by a THIRD, separate bug
 
 The `-l<name>`/`-L<dir>` search-path resolution described below is
 fixed in `<pending>` ("Fix wrapCommand: resolve bare -l<name> against
@@ -10,18 +10,27 @@ in a separate subdirectory, symlinked into the main build tree under a
 different basename, linked via a bare `-L. -lname`). Retesting real
 x265 against this fix DOES resolve `-lx265-10`/`-lx265-12` correctly
 (rewritten to `../build-10bits/libx265.a`/`../build-12bits/libx265.a`,
-the real symlink targets) -- but x265 itself is STILL blocked, by a
-second, deeper, genuinely distinct bug: `build-10bits`/`build-12bits`
-are entire SEPARATE cmake configure+build trees, created as SIBLINGS of
-the main `build/` directory (x265's own `preConfigure` runs `cmake -B
-build-10bits ...` from `source/`, BEFORE `configurePhase`'s own `cd
-build`) -- `shim.collectStubs`'s stub-discovery walk only ever scans
-`dyndrv_buildRoot` (`.`, which resolves to `build/` by the time
-`collectPhase` runs), so the real `ar`-produced stub sitting in the
-sibling `build-10bits/` is never discovered as a stub at all. See
-`docs/sibling-build-dir-not-discovered-bug.md` for the full writeup of
-this second bug -- x265 remains on its `multibitdepthSupport = false`
-workaround until that one is also fixed.
+the real symlink targets).
+
+The second, deeper bug this resolved path's own target then hit --
+`build-10bits`/`build-12bits`'s own stubs never being discovered at
+all, since they live in SIBLING cmake trees `shim.collectStubs`'s
+stub-discovery walk never scanned -- is now ALSO fixed; see
+`docs/sibling-build-dir-not-discovered-bug.md`. With both fixes in
+place, `dyndrv-libx265_so_215.drv` (the derivation originally blocked
+by this bug) now links successfully.
+
+x265 itself, however, still does not reach a full end-to-end PASS
+without its `multibitdepthSupport = false` workaround: a THIRD,
+separate bug now blocks `test_TestBench`'s own link step
+(`build-10bits`/`build-12bits`'s own `api.cpp.o` stub appears to get
+compiled/registered as if `EXPORT_C_API=1` rather than the `0`
+`cmakeStaticLibFlags` actually requests, producing plain
+`x265_api_get_215`/`x265_api_query` symbols instead of the expected
+`x265_10bit::`/`x265_12bit::`-namespaced ones -- confirmed absent in a
+stock, unaccelerated x265 build). Not yet root-caused or documented as
+its own writeup; x265 remains on the workaround until that is
+resolved.
 
 ## Summary (original writeup, kept as history)
 

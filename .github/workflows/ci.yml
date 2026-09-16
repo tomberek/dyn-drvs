@@ -99,11 +99,11 @@ jobs:
       # `run-nix.sh`'s own `builder-rpc-v0` wrapping (it's designed to
       # work on stock Nix), but running it through the same loop is
       # harmless and keeps this step uniform. `example-17` through
-      # `-29` plus `-31`/`-32`/`-33`/`-34`/`-35`/`-36` are the regression
-      # fixtures for the cwd-relative-path-frame mismatch, CMake
-      # compiler-flag-probe passthrough, `autoreconfHook` phase-dropping,
-      # `finalAttrs.finalPackage`, compile+link-in-one-step header
-      # discovery, `-MT`/`-MF` argv-shape misclassification, `ar`/
+      # `-29` plus `-31`/`-32`/`-33`/`-34`/`-35`/`-36`/`-37` are the
+      # regression fixtures for the cwd-relative-path-frame mismatch,
+      # CMake compiler-flag-probe passthrough, `autoreconfHook`
+      # phase-dropping, `finalAttrs.finalPackage`, compile+link-in-one-step
+      # header discovery, `-MT`/`-MF` argv-shape misclassification, `ar`/
       # `ranlib` probe-invocation crashes, cmake+make's own out-of-tree
       # install failure, `ar`'s own real store-path inputs never wired as
       # derivation deps, a `-Wl,`-glued flag's own embedded path never
@@ -122,9 +122,11 @@ jobs:
       # override inherited from the caller crashing phase 1 setup
       # outright, automake's classic depcomp `-MF <depfile>`
       # side-output never round-tripping back out of a deferred
-      # compile, and a bare `-l<name>` link argument never resolved
-      # against its own relative `-L<dir>` search path, respectively --
-      # see each fixture's own header comment.
+      # compile, a bare `-l<name>` link argument never resolved
+      # against its own relative `-L<dir>` search path, and a sibling
+      # build directory (created by a `preConfigure`/`preBuild` hook
+      # before the main build dir) never scanned for stubs at all,
+      # respectively -- see each fixture's own header comment.
       #
       # Collect-and-report, not fail-fast: a plain `for ... || exit 1`
       # loop stops at the FIRST failing check, so a break in (say)
@@ -143,14 +145,14 @@ jobs:
       # page) gets a full pass/fail/timing table, so which of the ~30
       # checks failed -- and how long each one took -- is visible
       # without digging through the raw step log at all.
-      - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20/21/22/23/24/25/26/27/28/29/31/32/33/34/35/36)
+      - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20/21/22/23/24/25/26/27/28/29/31/32/33/34/35/36/37)
         run: |
           checks=(
             example-01 example-02 example-03-graph-of-two
             example-03-graph-of-three example-03-graph-with-groups
             example-03-graph-groupby-directory example-05 example-06
             example-07-accelerated example-07-patch-output
-            example-17 example-18 example-19 example-20 example-21 example-22 example-23 example-24 example-25 example-26 example-27 example-28 example-29 example-31 example-32 example-33 example-34 example-35 example-36
+            example-17 example-18 example-19 example-20 example-21 example-22 example-23 example-24 example-25 example-26 example-27 example-28 example-29 example-31 example-32 example-33 example-34 example-35 example-36 example-37
           )
           {
             echo "## Example checks"

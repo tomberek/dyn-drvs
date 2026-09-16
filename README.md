@@ -274,21 +274,22 @@ behavior locked in by Nix core's own `tests/functional/dyn-drv/` suite
   "materialize now" mode, which `builder-rpc-v0` categorically cannot
   support. A separate `checkPhase` (gated by `doCheck`, running AFTER
   `buildPhase`) is unaffected. See `docs/discovertree-exec-bit-bug.md`.
-- **A bare `-l<name>` link argument's own producing STUB, when built in
-  a sibling directory created before the main build dir (e.g. via a
-  `preConfigure`/`preBuild` hook running a second, independent
-  configure+build cycle), is never discovered by `shim.collectStubs` at
-  all** — stub-discovery only scans `dyndrv_buildRoot` itself; a
-  sibling directory's own real content is carried forward for source/
-  header purposes (`.dyndrv-carried-up1`) but never re-scanned for
-  stubs. The `-l<name>`/relative-`-L<dir>` search-path resolution itself
-  IS fixed (`-lx265-10` now correctly rewrites to its real relative
-  symlink target, `../build-10bits/libx265.a`) — see
-  `docs/bare-lname-link-arg-bug.md` — but x265 itself remains blocked by
-  this second, distinct gap: `ld.bfd: cannot find ../build-10bits/
-  libx265.a: No such file or directory` even though that file's
-  producing `ar` step genuinely ran (and deferred) for real. See
-  `docs/sibling-build-dir-not-discovered-bug.md`.
+- **x265's own `multibitdepthSupport`/`unittestsSupport` combination
+  still isn't a full, unaccelerated-equivalent PASS**, though the two
+  bugs that originally blocked it are both fixed: the `-l<name>`/
+  relative-`-L<dir>` search-path resolution (`docs/bare-lname-link-arg-bug.md`)
+  and sibling-build-dir stub discovery (a package's own `preConfigure`/
+  `preBuild` hook running a second, independent configure+build cycle
+  in a directory that becomes a sibling of the main build dir, e.g.
+  x265's own `build-10bits`/`build-12bits` — previously never scanned
+  by `shim.collectStubs` at all; see
+  `docs/sibling-build-dir-not-discovered-bug.md`, now fixed). With both
+  fixes in place, `dyndrv-libx265_so_215.drv` (originally blocked by
+  `ld.bfd: cannot find ../build-10bits/libx265.a`) now links
+  successfully. A third, separate, not-yet-root-caused bug now blocks
+  `test_TestBench`'s own link step instead — confirmed absent from a
+  stock, unaccelerated x265 build. x265 remains on its
+  `multibitdepthSupport = false` workaround until that is resolved.
 - **A libtool-generated unversioned `.so` symlink (`libfoo.so ->
   libfoo.so.N.N.N`) is never registered as an alias for the dynamic
   derivation that produces the real, versioned file** — a later link

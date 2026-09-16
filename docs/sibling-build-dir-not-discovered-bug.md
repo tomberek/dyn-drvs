@@ -1,11 +1,47 @@
-# Bug: a sibling build directory (created via a `preConfigure`/`preBuild` hook, before the main `cd build`) is never scanned for stubs at all
+# FIXED: a sibling build directory (created via a `preConfigure`/`preBuild` hook, before the main `cd build`) is never scanned for stubs at all
 
-## Summary
+## Status: fixed
+
+Fixed in `nix/lib/shim/collectStubs.nix`: a new sibling-directory
+detection pass runs BEFORE Phase 1 (keyed off `CMakeCache.txt`'s own
+`CMAKE_HOME_DIRECTORY` differing from `dyndrv_buildRoot`, the same
+signal `.dyndrv-carried-up1`'s existing carry-forward already uses),
+populating `dyndrv_extraRoots` with every sibling that itself looks
+like another build directory. Phase 1's own `find` walk now also scans
+every entry in `dyndrv_extraRoots`, keying each discovered stub
+`../<sibling-name>/<subpath>` -- the same relative-path convention
+`dyndrv_join_rel` already normalizes any `../`-prefixed argv reference
+to, so a later link step's own `../build-10bits/libx265.a` reference
+resolves against this key with no further changes needed downstream.
+Phase 8's `.dyndrv-carried-up1` carry-forward now also strips each
+sibling's own real stubs from its content copy (replacing them with
+the correctly-resolved final symlink instead), so the placeholder text
+doesn't linger in the submitted tree.
+
+Confirmed via a new regression fixture,
+`try-it-out/examples/37-accelerate-sibling-build-dir.nix` (mirrors
+x265's own `multibitdepthSupport` shape exactly), and via a real
+x265 rebuild: `dyndrv-libx265_so_215.drv` -- the exact derivation
+originally blocked by "cannot find -lx265-10" -- now links
+successfully, with both `build-10bits`/`build-12bits` sibling trees
+correctly discovered and registered as real dynamic derivations.
+
+Real x265 (multibitdepth + unittests, no workaround) still does not
+reach a full end-to-end PASS: a separate, distinct bug in `test_
+TestBench`'s own link step surfaced only once this fix let the build
+progress far enough to reach it (`build-10bits`/`build-12bits`'s own
+`api.cpp.o` stub appears to get compiled/registered as if
+`EXPORT_C_API=1` rather than the `0` `cmakeStaticLibFlags` actually
+requests, producing plain `x265_api_get_215`/`x265_api_query` symbols
+instead of the expected `x265_10bit::`/`x265_12bit::`-namespaced ones
+-- confirmed absent in a stock, unaccelerated x265 build). That is a
+new, separate investigation, not part of this fix.
+
+## Summary (original writeup, kept as history)
 
 Found while investigating x265's `-l<name>` link-arg gap
 (`bare-lname-link-arg-bug.md`) after fixing the search-path resolution
-half of that bug. Still genuinely open at the `dyndrv` level as of this
-writing.
+half of that bug.
 
 ## Reproduction
 

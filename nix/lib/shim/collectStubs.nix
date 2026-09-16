@@ -307,9 +307,76 @@ in
     # compared against a stub key relative to `dyndrv_buildRoot`.
     dyndrv_buildRootTop=$(${pkgs.coreutils}/bin/realpath -m --relative-to="''${NIX_BUILD_TOP:-/build}" "$dyndrv_buildRoot")
 
+    # A package's own `preConfigure`/`preBuild` hook can run a SECOND,
+    # entirely independent cmake configure+build cycle against a SIBLING
+    # directory, before the main build even starts -- confirmed via real
+    # nixpkgs x265 (`multibitdepthSupport`): its own `preConfigure` runs
+    # `cmake -B build-10bits ...`/`cmake -B build-12bits ...` from
+    # `source/`, BEFORE `configurePhase`'s own `mkdir -p build; cd
+    # build`, so `build-10bits`/`build-12bits` end up as SIBLINGS of the
+    # main `build/` dir, each with its own real, genuinely-built `ar`
+    # stub (`build-10bits/libx265.a`) that phase 1's own stub-discovery
+    # (below, historically scanning ONLY `dyndrv_buildRoot`) never saw
+    # at all -- confirmed by direct reproduction: `ld.bfd: cannot find
+    # ../build-10bits/libx265.a: No such file or directory` even though
+    # that exact file's own producing `ar` invocation genuinely ran (and
+    # correctly deferred) inside THIS SAME sandboxed build. See
+    # `docs/sibling-build-dir-not-discovered-bug.md` for the full
+    # original writeup this fixes.
+    #
+    # Detected the SAME way `.dyndrv-carried-up1`'s own existing
+    # (content-only, stub-unaware) carry-forward already does for
+    # cmake+make out-of-tree builds (Phase 8 below): `CMakeCache.txt`'s
+    # own `CMAKE_HOME_DIRECTORY` differs from `dyndrv_buildRoot` itself
+    # exactly when cmake was invoked from a directory ABOVE the current
+    # one (`cmakeConfigurePhase`'s ordinary `mkdir -p build; cd build`)
+    # -- every OTHER sibling of `dyndrv_buildRoot` under that SAME parent
+    # is a candidate extra root, since that's exactly where a hook like
+    # x265's own `preConfigure` places its own independent build tree.
+    # Meson builds never hit this (gated on `CMakeCache.txt` existing,
+    # matching Phase 8's own gate below) -- no known meson-based package
+    # in this survey runs a second, sibling `meson setup` before the
+    # main configure, so this stays scoped to the one confirmed shape.
+    dyndrv_extraRoots=()
+    if [ -f "$dyndrv_buildRoot/CMakeCache.txt" ]; then
+      dyndrv_buildAbsEarly=$(${pkgs.coreutils}/bin/realpath "$dyndrv_buildRoot")
+      dyndrv_cmakeHomeEarly=$(${pkgs.gnused}/bin/sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$dyndrv_buildRoot/CMakeCache.txt")
+      dyndrv_cmakeHomeAbsEarly=$(${pkgs.coreutils}/bin/realpath -m "$dyndrv_cmakeHomeEarly")
+      if [ "$dyndrv_cmakeHomeAbsEarly" != "$dyndrv_buildAbsEarly" ]; then
+        dyndrv_buildParentAbsEarly=$(${pkgs.coreutils}/bin/dirname "$dyndrv_buildAbsEarly")
+        dyndrv_buildBasenameEarly=$(${pkgs.coreutils}/bin/basename "$dyndrv_buildAbsEarly")
+        for _dcs_sibEarly in "$dyndrv_buildParentAbsEarly"/* "$dyndrv_buildParentAbsEarly"/.[!.]*; do
+          [ -d "$_dcs_sibEarly" ] || continue
+          _dcs_sibNameEarly=$(${pkgs.coreutils}/bin/basename "$_dcs_sibEarly")
+          [ "$_dcs_sibNameEarly" = "$dyndrv_buildBasenameEarly" ] && continue
+          # Only a sibling that itself looks like ANOTHER build
+          # directory (its own `CMakeCache.txt`/`Makefile`, the same
+          # markers a real cmake+make build always produces) is worth
+          # the extra `find` pass below -- a sibling that's just source
+          # content (`CMakeLists.txt`, `src/`, ...) has no stubs to
+          # discover, only files `.dyndrv-carried-up1`'s own later,
+          # unconditional content-copy already handles correctly.
+          if [ -f "$_dcs_sibEarly/CMakeCache.txt" ] || [ -f "$_dcs_sibEarly/Makefile" ]; then
+            dyndrv_extraRoots+=("$_dcs_sibEarly")
+          fi
+        done
+      fi
+    fi
+
     # Phase 1: discover every stub under buildRoot; read each one's own
     # record path and `key` (empty/missing means "not opted into a batch
-    # group" -- exactly `shouldBatch`'s own default).
+    # group" -- exactly `shouldBatch`'s own default). ALSO scans every
+    # `dyndrv_extraRoots` entry detected above (a sibling build directory
+    # a `preConfigure`/`preBuild` hook created), keying its own stubs
+    # `../<sibling-name>/<subpath>` -- the SAME relative-path convention
+    # `dyndrv_join_rel` already normalizes any `../`-prefixed argv
+    # reference to (confirmed by direct reading: Phase 2's own dep-scan
+    # below joins EVERY record's own args against `dyndrv_buildRoot`
+    # via that exact function, with no assumption baked in anywhere that
+    # a stub key can't itself contain a leading `../`), so a LATER
+    # link step's own `../build-10bits/libx265.a` argv reference
+    # resolves against this exact same key with zero further changes
+    # needed downstream.
     declare -A DYNDRV_STUB_RECORD=()
     declare -A DYNDRV_STUB_KEY=()
     dyndrv_stubPaths=()
@@ -321,6 +388,19 @@ in
       DYNDRV_STUB_KEY[$_dcs_rel]=$(${pkgs.jq}/bin/jq -r '.key // ""' "$_dcs_rec")
       dyndrv_stubPaths+=("$_dcs_rel")
     done < <(find "$dyndrv_buildRoot" -type f -print0)
+    for _dcs_extraRoot in "''${dyndrv_extraRoots[@]:-}"; do
+      [ -z "$_dcs_extraRoot" ] && continue
+      _dcs_extraRootName=$(${pkgs.coreutils}/bin/basename "$_dcs_extraRoot")
+      while IFS= read -r -d "" _dcs_f; do
+        _dcs_relInRoot="''${_dcs_f#$_dcs_extraRoot/}"
+        _dcs_rel="../$_dcs_extraRootName/$_dcs_relInRoot"
+        _dcs_rec=$(dyndrv_read_batch_stub "$_dcs_f")
+        [ -z "$_dcs_rec" ] && continue
+        DYNDRV_STUB_RECORD[$_dcs_rel]="$_dcs_rec"
+        DYNDRV_STUB_KEY[$_dcs_rel]=$(${pkgs.jq}/bin/jq -r '.key // ""' "$_dcs_rec")
+        dyndrv_stubPaths+=("$_dcs_rel")
+      done < <(find "$_dcs_extraRoot" -type f -print0)
+    done
 
     # Phase 2: compute each stub's deps generically -- any of its OWN
     # record's `args` entries that name another discovered stub's own
@@ -715,6 +795,13 @@ in
     ${pkgs.coreutils}/bin/cp -r "$dyndrv_buildRoot"/. "$dyndrv_origTree"/
     ${pkgs.coreutils}/bin/chmod -R u+w "$dyndrv_origTree"
     for _dcs_p in "''${dyndrv_stubPaths[@]}"; do
+      # A `../`-prefixed key (an extra-root sibling's own stub,
+      # discovered above) was never copied into `$dyndrv_origTree` at
+      # all -- it lives in `$dyndrv_carriedDir` instead, once the
+      # carry-forward copy below runs; stripped there, not here.
+      case "$_dcs_p" in
+        ../*) continue ;;
+      esac
       ${pkgs.coreutils}/bin/rm -f "$dyndrv_origTree/$_dcs_p"
     done
     # Phase 1's own absolute cwd, relative to `NIX_BUILD_TOP` (already
@@ -833,6 +920,22 @@ in
         _dcs_sibName=$(${pkgs.coreutils}/bin/basename "$_dcs_sib")
         [ "$_dcs_sibName" = "$dyndrv_buildBasename" ] && continue
         ${pkgs.coreutils}/bin/cp -r "$_dcs_sib" "$dyndrv_carriedDir/$_dcs_sibName"
+        ${pkgs.coreutils}/bin/chmod -R u+w "$dyndrv_carriedDir/$_dcs_sibName"
+        # Strip any REAL stub discovered under this sibling (see the
+        # `dyndrv_extraRoots` scan above, run BEFORE Phase 1) from the
+        # copy just made -- exactly like `dyndrv_origTree`'s own
+        # `rm -f` loop does for `dyndrv_buildRoot` itself, so this
+        # sibling's own placeholder text files don't linger in the
+        # final submitted tree once every real stub has its own
+        # correctly-registered dynamic-derivation symlink written
+        # below instead.
+        for _dcs_p in "''${dyndrv_stubPaths[@]}"; do
+          case "$_dcs_p" in
+            "../$_dcs_sibName/"*)
+              ${pkgs.coreutils}/bin/rm -f "$dyndrv_carriedDir/''${_dcs_p#../}"
+              ;;
+          esac
+        done
       done
       fi
     fi
@@ -996,7 +1099,18 @@ in
 
     _dcs_finalCopyLines="${pkgs.coreutils}/bin/mkdir -p \$out; ${pkgs.coreutils}/bin/cp -r ${builtins.storeDir}/$dyndrv_origTreeBasename/. \$out/; ${pkgs.coreutils}/bin/chmod -R u+w \$out; "
     for _dcs_p in "''${dyndrv_stubPaths[@]}"; do
-      _dcs_finalCopyLines="$_dcs_finalCopyLines${pkgs.coreutils}/bin/mkdir -p \"\$(${pkgs.coreutils}/bin/dirname \"\$out/$_dcs_p\")\"; ${pkgs.coreutils}/bin/ln -s \"@dyndrv-final-placeholder:$_dcs_p@\" \"\$out/$_dcs_p\"; "
+      # A `../`-prefixed key (an extra-root sibling's own stub) lives
+      # under `.dyndrv-carried-up1/<name-without-../>` in the SUBMITTED
+      # tree (see the carry-forward copy above, which already stripped
+      # its own placeholder text from that exact location) -- writing
+      # the real symlink there, NOT at a literal `$out/../...` (which
+      # would try to escape `$out` entirely, the same directory this
+      # whole derivation's own output IS).
+      case "$_dcs_p" in
+        ../*) _dcs_finalRelDest=".dyndrv-carried-up1/''${_dcs_p#../}" ;;
+        *) _dcs_finalRelDest="$_dcs_p" ;;
+      esac
+      _dcs_finalCopyLines="$_dcs_finalCopyLines${pkgs.coreutils}/bin/mkdir -p \"\$(${pkgs.coreutils}/bin/dirname \"\$out/$_dcs_finalRelDest\")\"; ${pkgs.coreutils}/bin/ln -s \"@dyndrv-final-placeholder:$_dcs_p@\" \"\$out/$_dcs_finalRelDest\"; "
     done
 
     _dcs_finalDrvJson=$(${pkgs.jq}/bin/jq -nc \
