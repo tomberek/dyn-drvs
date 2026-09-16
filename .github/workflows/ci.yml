@@ -125,16 +125,57 @@ jobs:
       # compile, and a bare `-l<name>` link argument never resolved
       # against its own relative `-L<dir>` search path, respectively --
       # see each fixture's own header comment.
+      #
+      # Collect-and-report, not fail-fast: a plain `for ... || exit 1`
+      # loop stops at the FIRST failing check, so a break in (say)
+      # example-20 hides whether -21 through -36 would have passed too
+      # -- confirmed this is a real cost, not hypothetical: earlier CI
+      # runs on this exact step left every later check's own status
+      # completely unknown after one early failure, forcing a second
+      # full CI round-trip just to learn the NEXT failure once the first
+      # was fixed. Every check now always runs (no `set -e`/early exit
+      # on a single check's own failure), each one's pass/fail/timing is
+      # recorded, and the step only fails at the very end, after every
+      # check has had a chance to report -- while still failing the JOB
+      # overall if anything failed, so this stays a real gate, not just
+      # an informational report. `$GITHUB_STEP_SUMMARY` (a real file
+      # GitHub renders as markdown directly in the job's own summary
+      # page) gets a full pass/fail/timing table, so which of the ~30
+      # checks failed -- and how long each one took -- is visible
+      # without digging through the raw step log at all.
       - name: Run example checks (01/02/03-graph-*/05/06/07/17/18/19/20/21/22/23/24/25/26/27/28/29/31/32/33/34/35/36)
         run: |
-          for check in example-01 example-02 example-03-graph-of-two \
-            example-03-graph-of-three example-03-graph-with-groups \
-            example-03-graph-groupby-directory example-05 example-06 \
-            example-07-accelerated example-07-patch-output \
-            example-17 example-18 example-19 example-20 example-21 example-22 example-23 example-24 example-25 example-26 example-27 example-28 example-29 example-31 example-32 example-33 example-34 example-35 example-36; do
-            ./try-it-out/run-nix.sh build --impure --no-link \
-              --print-out-paths ".#checks.x86_64-linux.$check"
+          checks=(
+            example-01 example-02 example-03-graph-of-two
+            example-03-graph-of-three example-03-graph-with-groups
+            example-03-graph-groupby-directory example-05 example-06
+            example-07-accelerated example-07-patch-output
+            example-17 example-18 example-19 example-20 example-21 example-22 example-23 example-24 example-25 example-26 example-27 example-28 example-29 example-31 example-32 example-33 example-34 example-35 example-36
+          )
+          {
+            echo "## Example checks"
+            echo
+            echo "| Check | Result | Time |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=()
+          for check in "${checks[@]}"; do
+            start=$(date +%s)
+            if ./try-it-out/run-nix.sh build --impure --no-link \
+                --print-out-paths ".#checks.x86_64-linux.$check"; then
+              result="✅ pass"
+            else
+              result="❌ FAIL"
+              failed+=("$check")
+            fi
+            elapsed=$(( $(date +%s) - start ))
+            echo "| $check | $result | ${elapsed}s |" >> "$GITHUB_STEP_SUMMARY"
           done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo
+            echo "Failed checks: ${failed[*]}"
+            exit 1
+          fi
 
       - name: small-lib-patch-rebuild.sh regression check
         run: ./try-it-out/benchmarks/small-lib-patch-rebuild.sh 10 300
